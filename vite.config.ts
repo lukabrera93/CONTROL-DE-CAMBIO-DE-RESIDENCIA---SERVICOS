@@ -8,23 +8,19 @@ import { defineConfig } from 'vite';
 
 const CONFIG_DIR = path.dirname(fileURLToPath(import.meta.url));
 
-function normalizeBase(raw?: string): string {
-  if (!raw) return '/';
+function resolveBuildBase(): string {
+  const raw = process.env.VITE_BASE_PATH;
+  if (!raw) return './';
   const trimmed = raw.trim();
-  if (!trimmed || trimmed === '/') return '/';
-  if (trimmed === './') return './';
+  if (!trimmed || trimmed === './') return './';
+  if (trimmed === '/') return '/';
   const withLeading = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
   return withLeading.endsWith('/') ? withLeading : `${withLeading}/`;
 }
 
-const resolvedBase = normalizeBase(
-  process.env.VITE_BASE_PATH ||
-    (process.env.GITHUB_ACTIONS === 'true' && process.env.GITHUB_REPOSITORY
-      ? `/${process.env.GITHUB_REPOSITORY.split('/')[1]}/`
-      : '/')
-);
+export default defineConfig(({ command }) => {
+  const resolvedBase = command === 'build' ? resolveBuildBase() : '/';
 
-export default defineConfig(() => {
   return {
     base: resolvedBase,
     plugins: [
@@ -32,13 +28,6 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
-        includeAssets: [
-          'icon.svg',
-          'apple-touch-icon.png',
-          'pwa-192x192.png',
-          'pwa-512x512.png',
-          'pwa-maskable-512x512.png',
-        ],
         manifest: {
           id: resolvedBase,
           name: 'ResiControl — Gestión de Planillas',

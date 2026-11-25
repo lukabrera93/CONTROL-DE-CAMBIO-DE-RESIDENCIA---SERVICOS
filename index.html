@@ -21,8 +21,77 @@
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
   </head>
   <body class="bg-slate-50 text-slate-900 antialiased">
-    <div id="root"></div>
+    <div id="root">
+      <div id="resi-boot-fallback" style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;font-family:system-ui,-apple-system,sans-serif;color:#0f172a;background:#f8fafc;">
+        <div style="max-width:460px;width:100%;background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:24px;text-align:center;">
+          <div style="font-weight:700;font-size:16px;color:#0f766e;">ResiControl</div>
+          <p id="resi-boot-status" style="margin:8px 0 0;font-size:13px;color:#475569;">Cargando aplicación...</p>
+          <div id="resi-boot-help" style="display:none;margin-top:16px;text-align:left;font-size:12px;color:#334155;line-height:1.5;border-top:1px solid #e2e8f0;padding-top:14px;">
+            <p style="margin:0 0 8px;">Si la pantalla no terminó de cargar en GitHub Pages:</p>
+            <ul style="margin:0 0 12px 18px;padding:0;">
+              <li>En GitHub abra <strong>Settings → Pages → Build and deployment → Source</strong> y seleccione <strong>GitHub Actions</strong> (no <em>Deploy from a branch</em>).</li>
+              <li>Luego limpie la caché del navegador para reemplazar versiones antiguas del Service Worker.</li>
+            </ul>
+            <button id="resi-boot-reset" type="button" style="width:100%;padding:9px 14px;background:#0f766e;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;">
+              Limpiar caché y recargar
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        var shown = false;
+        function showBootHelp(reason) {
+          if (shown) return;
+          var fallback = document.getElementById('resi-boot-fallback');
+          if (!fallback) return;
+          shown = true;
+          var statusEl = document.getElementById('resi-boot-status');
+          var helpEl = document.getElementById('resi-boot-help');
+          if (statusEl) {
+            statusEl.textContent = reason || 'No se pudo inicializar el paquete compilado de la aplicación.';
+            statusEl.style.color = '#b91c1c';
+          }
+          if (helpEl) helpEl.style.display = 'block';
+          var btn = document.getElementById('resi-boot-reset');
+          if (btn) {
+            btn.onclick = function () {
+              Promise.resolve()
+                .then(function () {
+                  if ('serviceWorker' in navigator) {
+                    return navigator.serviceWorker.getRegistrations().then(function (regs) {
+                      return Promise.all(regs.map(function (r) { return r.unregister(); }));
+                    });
+                  }
+                })
+                .then(function () {
+                  if ('caches' in window) {
+                    return caches.keys().then(function (keys) {
+                      return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+                    });
+                  }
+                })
+                .catch(function () {})
+                .finally(function () {
+                  window.location.reload();
+                });
+            };
+          }
+        }
+        window.addEventListener('error', function (ev) {
+          var target = ev && ev.target;
+          if (target && target.tagName === 'SCRIPT') {
+            showBootHelp('No se pudo cargar el script de inicio (' + (target.getAttribute('src') || 'desconocido') + ').');
+          }
+        }, true);
+        setTimeout(function () {
+          if (document.getElementById('resi-boot-fallback')) {
+            showBootHelp('La carga está tardando más de lo habitual o hay una caché antigua activa.');
+          }
+        }, 5000);
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-
