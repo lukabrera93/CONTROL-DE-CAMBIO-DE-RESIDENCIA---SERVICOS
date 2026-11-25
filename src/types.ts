@@ -18,6 +18,7 @@ export interface ResidenceRecord {
   month_key: string;
   source_file: string;
   notes: string;
+  dispatched_at?: string;
   created_at: string;
   updated_at: string;
   is_duplicate?: boolean;

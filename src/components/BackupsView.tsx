@@ -7,17 +7,18 @@ import {
   CheckCircle2,
   AlertTriangle,
 } from 'lucide-react';
-import type { BackupEntry } from '../types';
+import type { BackupEntry, ResidenceRecord } from '../types';
+import { downloadLocalBackupJson, downloadOfficialExcel } from '../lib/dataService';
 
 interface BackupsViewProps {
   backups: BackupEntry[];
-  totalRecords: number;
+  records: ResidenceRecord[];
   onRefresh: () => Promise<void>;
 }
 
 export const BackupsView: React.FC<BackupsViewProps> = ({
   backups,
-  totalRecords,
+  records,
   onRefresh,
 }) => {
   const [label, setLabel] = useState('');
@@ -91,25 +92,33 @@ export const BackupsView: React.FC<BackupsViewProps> = ({
           Respaldo Local y Exportación Maestra
         </h2>
         <p className="text-xs text-slate-500 mt-1">
-          Descargue una copia local íntegra de toda la base de datos ({totalRecords} registros actuales) en formato JSON para restauración completa o en Excel consolidado.
+          Descargue una copia local íntegra de toda la base de datos ({records.length} registros actuales) en formato JSON para restauración completa o en Excel consolidado, incluso sin internet.
         </p>
 
         <div className="mt-5 flex flex-wrap items-center gap-3">
-          <a
-            href="/api/backups/live-export"
-            className="inline-flex items-center gap-2 px-4 py-2 bg-teal-700 text-white text-xs font-medium rounded-lg hover:bg-teal-800 transition-colors whitespace-nowrap shrink-0"
+          <button
+            type="button"
+            onClick={() => downloadLocalBackupJson(records)}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-teal-700 text-white text-xs font-medium rounded-lg hover:bg-teal-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Download className="w-4 h-4" />
             Descargar Backup Local Completo (.json)
-          </a>
+          </button>
 
-          <a
-            href="/api/export/excel?status=all"
-            className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-300 text-slate-700 text-xs font-medium rounded-lg hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
+          <button
+            type="button"
+            onClick={() =>
+              downloadOfficialExcel({
+                records,
+                statusFilter: 'all',
+                monthFilter: 'all',
+              })
+            }
+            className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-300 text-slate-700 text-xs font-medium rounded-lg hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
             Descargar Planilla Maestra (.xlsx)
-          </a>
+          </button>
         </div>
       </div>
 

@@ -13,6 +13,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Info,
+  Printer,
 } from 'lucide-react';
 import type {
   ResidenceRecord,
@@ -26,6 +27,10 @@ import type {
   MonthlyServerReport,
   RecordStatus,
 } from './types';
+import {
+  fetchAppSnapshot,
+  syncPendingOutbox,
+} from './lib/dataService';
 import { DashboardView } from './components/DashboardView';
 import { RecordsView } from './components/RecordsView';
 import { UploadView } from './components/UploadView';
@@ -33,6 +38,12 @@ import { DuplicatesView } from './components/DuplicatesView';
 import { BackupsView } from './components/BackupsView';
 import { MonitoringView } from './components/MonitoringView';
 import { CicdView } from './components/CicdView';
+import {
+  PWAInstallButton,
+  OfflineSyncBanner,
+  useOnlineStatus,
+} from './components/PWAInstallButton';
+import { MonthlyReportPrintModal } from './components/MonthlyReportPrintModal';
 
 type TabKey =
   | 'dashboard'
@@ -54,12 +65,17 @@ const TAB_LABELS: Record<TabKey, string> = {
 };
 
 export default function App() {
+  const isOnline = useOnlineStatus();
   const [activeTab, setActiveTab] = useState<TabKey>('dashboard');
   const [statusFilter, setStatusFilter] = useState<RecordStatus | 'all' | 'duplicates'>('all');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const [loading, setLoading] = useState(true);
   const [demoLoading, setDemoLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [pendingSyncCount, setPendingSyncCount] = useState(0);
+  const [fromOfflineCache, setFromOfflineCache] = useState(false);
+
   const [records, setRecords] = useState<ResidenceRecord[]>([]);
   const [duplicateClusters, setDuplicateClusters] = useState<DuplicateCluster[]>([]);
   const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null);
@@ -73,38 +89,22 @@ export default function App() {
 
   const [notifDrawerOpen, setNotifDrawerOpen] = useState(false);
   const [toastAlert, setToastAlert] = useState<AppNotification | null>(null);
+  const [printReportOpen, setPrintReportOpen] = useState(false);
 
   const fetchAllData = useCallback(async () => {
     try {
-      const [
-        recRes,
-        anaRes,
-        upRes,
-        bakRes,
-        logRes,
-        notifRes,
-        metRes,
-        repRes,
-      ] = await Promise.all([
-        fetch('/api/records').then((r) => r.json()),
-        fetch('/api/analytics').then((r) => r.json()),
-        fetch('/api/uploads').then((r) => r.json()),
-        fetch('/api/backups').then((r) => r.json()),
-        fetch('/api/logs').then((r) => r.json()),
-        fetch('/api/notifications').then((r) => r.json()),
-        fetch('/api/metrics').then((r) => r.json()),
-        fetch('/api/reports/monthly').then((r) => r.json()),
-      ]);
-
-      setRecords(recRes.records || []);
-      setDuplicateClusters(recRes.duplicateClusters || []);
-      setAnalytics(anaRes || null);
-      setUploads(upRes.uploads || []);
-      setBackups(bakRes.backups || []);
-      setLogs(logRes.logs || []);
-      setNotifications(notifRes.notifications || []);
-      setMetrics(metRes || null);
-      setMonthlyReports(repRes.reports || []);
+      const snap = await fetchAppSnapshot();
+      setRecords(snap.records);
+      setDuplicateClusters(snap.duplicateClusters);
+      setAnalytics(snap.analytics);
+      setUploads(snap.uploads);
+      setBackups(snap.backups);
+      setLogs(snap.logs);
+      setNotifications(snap.notifications);
+      setMetrics(snap.metrics);
+      setMonthlyReports(snap.monthlyReports);
+      setFromOfflineCache(snap.fromOfflineCache);
+      setPendingSyncCount(snap.pendingSyncCount);
     } catch (err) {
       console.error('Error fetching dashboard data:', err);
     } finally {
@@ -112,12 +112,35 @@ export default function App() {
     }
   }, []);
 
+  const handleSyncNow = useCallback(async () => {
+    if (!navigator.onLine) return;
+    setSyncing(true);
+    try {
+      await syncPendingOutbox();
+      await fetchAllData();
+    } finally {
+      setSyncing(false);
+    }
+  }, [fetchAllData]);
+
   useEffect(() => {
     fetchAllData();
   }, [fetchAllData]);
 
-  // Real-time SSE connection for notifications, metrics, logs & live sync
+  // Auto-sync queued offline operations when connectivity returns
   useEffect(() => {
+    if (isOnline && pendingSyncCount > 0) {
+      handleSyncNow();
+    }
+  }, [isOnline, pendingSyncCount, handleSyncNow]);
+
+  // Real-time SSE connection when online
+  useEffect(() => {
+    if (!isOnline) {
+      setSseConnected(false);
+      return;
+    }
+
     const es = new EventSource('/api/events');
 
     es.addEventListener('connected', () => {
@@ -165,7 +188,7 @@ export default function App() {
     return () => {
       es.close();
     };
-  }, [fetchAllData]);
+  }, [fetchAllData, isOnline]);
 
   useEffect(() => {
     if (!toastAlert) return;
@@ -176,7 +199,9 @@ export default function App() {
   const unreadCount = notifications.filter((n) => n.is_read === 0).length;
 
   const handleMarkAllRead = async () => {
-    await fetch('/api/notifications/read-all', { method: 'POST' });
+    if (isOnline) {
+      await fetch('/api/notifications/read-all', { method: 'POST' }).catch(() => {});
+    }
     setNotifications((prev) => prev.map((n) => ({ ...n, is_read: 1 })));
   };
 
@@ -233,14 +258,14 @@ export default function App() {
       {/* Mobile Sidebar Backdrop */}
       {mobileMenuOpen && (
         <div
-          className="fixed inset-0 z-30 bg-slate-900/40 lg:hidden"
+          className="no-print fixed inset-0 z-30 bg-slate-900/40 lg:hidden"
           onClick={() => setMobileMenuOpen(false)}
         />
       )}
 
       {/* Left Sidebar (256px) */}
       <aside
-        className={`fixed inset-y-0 left-0 z-40 w-64 bg-white border-r border-slate-200 flex flex-col transition-transform duration-200 lg:static lg:translate-x-0 ${
+        className={`no-print fixed inset-y-0 left-0 z-40 w-64 bg-white border-r border-slate-200 flex flex-col transition-transform duration-200 lg:static lg:translate-x-0 ${
           mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
@@ -297,12 +322,30 @@ export default function App() {
               </button>
             );
           })}
+
+          <div className="pt-3 mt-3 border-t border-slate-200">
+            <button
+              type="button"
+              onClick={() => {
+                setMobileMenuOpen(false);
+                setPrintReportOpen(true);
+              }}
+              className="w-full flex items-center gap-3 px-3 py-2.5 text-sm font-medium text-slate-700 rounded-lg hover:bg-slate-50 hover:text-slate-900 transition-colors cursor-pointer"
+            >
+              <Printer className="w-4 h-4 text-teal-700 shrink-0" />
+              <span className="truncate">Imprimir Informe Mensual</span>
+            </button>
+          </div>
         </nav>
 
-        <div className="p-4 border-t border-slate-200 text-xs text-slate-500">
-          <div>Cambio de Residencia</div>
-          <div className="mt-0.5 font-mono tabular-nums text-[11px] text-slate-400">
-            SQLite · {analytics?.totals.total || 0} reg.
+        <div className="p-4 border-t border-slate-200 space-y-3">
+          <PWAInstallButton variant="sidebar" records={records} />
+          <div className="text-xs text-slate-500">
+            <div>Cambio de Residencia</div>
+            <div className="mt-0.5 font-mono tabular-nums text-[11px] text-slate-400">
+              {fromOfflineCache || !isOnline ? 'Modo Offline (IndexedDB)' : 'SQLite + PWA Offline'} ·{' '}
+              {analytics?.totals.total || 0} reg.
+            </div>
           </div>
         </div>
       </aside>
@@ -310,7 +353,7 @@ export default function App() {
       {/* Main Content Area */}
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Top Bar Contract */}
-        <header className="h-16 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between gap-4 sticky top-0 z-20 shrink-0">
+        <header className="no-print h-16 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between gap-4 sticky top-0 z-20 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
             <button
               type="button"
@@ -350,6 +393,8 @@ export default function App() {
                 </span>
               )}
             </button>
+
+            <PWAInstallButton variant="header" records={records} />
 
             <button
               type="button"
@@ -411,8 +456,19 @@ export default function App() {
           </div>
         </header>
 
+        <OfflineSyncBanner
+          isOnline={isOnline}
+          pendingCount={pendingSyncCount}
+          syncing={syncing}
+          onSyncNow={handleSyncNow}
+        />
+
         {/* Main Viewport */}
-        <main className="flex-1 p-4 sm:p-6 max-w-[1440px] w-full mx-auto">
+        <main
+          className={`flex-1 p-4 sm:p-6 max-w-[1440px] w-full mx-auto ${
+            printReportOpen ? 'no-print' : ''
+          }`}
+        >
           {activeTab === 'dashboard' && (
             <DashboardView
               analytics={analytics}
@@ -420,17 +476,20 @@ export default function App() {
               onNavigate={handleNavigate}
               onLoadDemo={handleLoadDemo}
               demoLoading={demoLoading}
+              onOpenPrintReport={() => setPrintReportOpen(true)}
             />
           )}
 
           {activeTab === 'records' && (
             <RecordsView
               records={records}
+              uploads={uploads}
               availableMonths={analytics?.availableMonths || []}
               statusFilter={statusFilter}
               onStatusFilterChange={setStatusFilter}
               onRefresh={fetchAllData}
               onNavigateDuplicates={() => handleNavigate('duplicates')}
+              onOpenPrintReport={() => setPrintReportOpen(true)}
             />
           )}
 
@@ -451,7 +510,7 @@ export default function App() {
           {activeTab === 'backups' && (
             <BackupsView
               backups={backups}
-              totalRecords={records.length}
+              records={records}
               onRefresh={fetchAllData}
             />
           )}
@@ -468,11 +527,29 @@ export default function App() {
 
           {activeTab === 'cicd' && <CicdView />}
         </main>
+
+        <footer className="no-print border-t border-slate-200 bg-white px-4 sm:px-6 py-3 text-xs text-slate-500 flex flex-col sm:flex-row items-center justify-between gap-2">
+          <span>
+            © {new Date().getFullYear()} ResiControl · Todos los derechos reservados.
+          </span>
+          <span className="font-medium text-slate-700">
+            Desarrollado por Lucio Pastor Cabrera Olmedo
+          </span>
+        </footer>
       </div>
+
+      {/* Printable Monthly Progress Report Modal */}
+      <MonthlyReportPrintModal
+        open={printReportOpen}
+        onClose={() => setPrintReportOpen(false)}
+        records={records}
+        uploads={uploads}
+        availableMonths={analytics?.availableMonths || []}
+      />
 
       {/* Automatic Duplicate / Import Real-time Toast Notification */}
       {toastAlert && (
-        <div className="fixed bottom-5 right-5 z-50 max-w-sm bg-white border border-slate-200 rounded-lg shadow-lg p-4">
+        <div className="no-print fixed bottom-5 right-5 z-50 max-w-sm bg-white border border-slate-200 rounded-lg shadow-lg p-4">
           <div className="flex items-start gap-3">
             {toastAlert.type === 'duplicate_alert' ? (
               <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />

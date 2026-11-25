@@ -8,6 +8,11 @@ import {
   X,
 } from 'lucide-react';
 import type { UploadBatch } from '../types';
+import {
+  previewExcelFile,
+  importExcelData,
+  downloadOfficialExcel,
+} from '../lib/dataService';
 
 interface PreviewRow {
   row_number: number;
@@ -63,6 +68,22 @@ export const UploadView: React.FC<UploadViewProps> = ({
     duplicatesDetected: number;
   } | null>(null);
 
+  const savedDistritos = React.useMemo(() => {
+    const s = new Set<string>();
+    for (const u of uploads) {
+      if (u.distrito?.trim()) s.add(u.distrito.trim());
+    }
+    return Array.from(s).sort((a, b) => a.localeCompare(b, 'es'));
+  }, [uploads]);
+
+  const savedServicios = React.useMemo(() => {
+    const s = new Set<string>();
+    for (const u of uploads) {
+      if (u.servicio?.trim()) s.add(u.servicio.trim());
+    }
+    return Array.from(s).sort((a, b) => a.localeCompare(b, 'es'));
+  }, [uploads]);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFile = async (file: File) => {
@@ -71,26 +92,10 @@ export const UploadView: React.FC<UploadViewProps> = ({
     setParsing(true);
 
     try {
-      const base64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ''));
-        reader.onerror = () => reject(new Error('No se pudo leer el archivo'));
-        reader.readAsDataURL(file);
-      });
-
-      const resp = await fetch('/api/import/preview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: file.name, base64 }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) {
-        throw new Error(data.error || 'Error al analizar la planilla');
-      }
-
+      const data = await previewExcelFile(file);
       setPreview({
         filename: file.name,
-        base64,
+        base64: data.base64,
         distrito: data.distrito || '',
         servicio: data.servicio || '',
         responsable: data.responsable || '',
@@ -113,22 +118,15 @@ export const UploadView: React.FC<UploadViewProps> = ({
     setImporting(true);
     setError(null);
     try {
-      const resp = await fetch('/api/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          filename: preview.filename,
-          base64: preview.base64,
-          monthKey,
-          distritoOverride,
-          servicioOverride,
-          responsableOverride,
-        }),
+      const data = await importExcelData({
+        filename: preview.filename,
+        base64: preview.base64,
+        monthKey,
+        distritoOverride,
+        servicioOverride,
+        responsableOverride,
+        parsedRows: preview.rows,
       });
-      const data = await resp.json();
-      if (!resp.ok) {
-        throw new Error(data.error || 'Error al importar planilla');
-      }
       setImportResult({
         imported: data.imported,
         duplicatesDetected: data.duplicatesDetected,
@@ -155,13 +153,21 @@ export const UploadView: React.FC<UploadViewProps> = ({
               Extrae automáticamente Distrito, Servicio, Responsable y cada casilla de la tabla de Cambio de Residencia.
             </p>
           </div>
-          <a
-            href="/api/export/excel?template=true"
-            className="inline-flex items-center gap-2 px-3.5 py-2 bg-white border border-slate-300 text-slate-700 text-xs font-medium rounded-lg hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
+          <button
+            type="button"
+            onClick={() =>
+              downloadOfficialExcel({
+                records: [],
+                statusFilter: 'all',
+                monthFilter: 'all',
+                template: true,
+              })
+            }
+            className="inline-flex items-center gap-2 px-3.5 py-2 bg-white border border-slate-300 text-slate-700 text-xs font-medium rounded-lg hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Download className="w-4 h-4" />
             Descargar Plantilla Vacía Oficial
-          </a>
+          </button>
         </div>
 
         {/* Dropzone */}
@@ -276,27 +282,39 @@ export const UploadView: React.FC<UploadViewProps> = ({
           <div className="p-6 bg-slate-50 border-b border-slate-200 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">
-                Distrito
+                Distrito (para filtro)
               </label>
               <input
                 type="text"
+                list="distritos-manuales"
                 value={distritoOverride}
                 onChange={(e) => setDistritoOverride(e.target.value)}
-                placeholder="Ej: Capital"
+                placeholder="Añadir distrito manualmente"
                 className="w-full px-3 py-1.5 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-teal-600"
               />
+              <datalist id="distritos-manuales">
+                {savedDistritos.map((d) => (
+                  <option key={d} value={d} />
+                ))}
+              </datalist>
             </div>
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">
-                Servicio
+                Servicio (para filtro)
               </label>
               <input
                 type="text"
+                list="servicios-manuales"
                 value={servicioOverride}
                 onChange={(e) => setServicioOverride(e.target.value)}
-                placeholder="Ej: USF San Vicente"
+                placeholder="Añadir servicio manualmente"
                 className="w-full px-3 py-1.5 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-teal-600"
               />
+              <datalist id="servicios-manuales">
+                {savedServicios.map((s) => (
+                  <option key={s} value={s} />
+                ))}
+              </datalist>
             </div>
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">

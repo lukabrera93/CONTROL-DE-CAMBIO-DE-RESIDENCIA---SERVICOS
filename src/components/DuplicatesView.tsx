@@ -9,6 +9,11 @@ import {
   X,
 } from 'lucide-react';
 import type { DuplicateCluster, ResidenceRecord } from '../types';
+import {
+  deleteRecordEntry,
+  updateRecordStatusOrFields,
+  resolveDuplicatesBatch,
+} from '../lib/dataService';
 
 interface DuplicatesViewProps {
   clusters: DuplicateCluster[];
@@ -26,7 +31,7 @@ export const DuplicatesView: React.FC<DuplicatesViewProps> = ({
   const handleDeleteOne = async (id: number) => {
     setBusy(true);
     try {
-      await fetch(`/api/records/${id}`, { method: 'DELETE' });
+      await deleteRecordEntry(id);
       await onRefresh();
     } finally {
       setBusy(false);
@@ -38,7 +43,7 @@ export const DuplicatesView: React.FC<DuplicatesViewProps> = ({
     try {
       for (const rec of cluster.records) {
         if (rec.id !== keepId) {
-          await fetch(`/api/records/${rec.id}`, { method: 'DELETE' });
+          await deleteRecordEntry(rec.id);
         }
       }
       await onRefresh();
@@ -50,11 +55,7 @@ export const DuplicatesView: React.FC<DuplicatesViewProps> = ({
   const handleResolveAll = async (keep: 'earliest' | 'latest') => {
     setBusy(true);
     try {
-      await fetch('/api/duplicates/resolve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keep }),
-      });
+      await resolveDuplicatesBatch(keep);
       await onRefresh();
     } finally {
       setBusy(false);
@@ -78,11 +79,7 @@ export const DuplicatesView: React.FC<DuplicatesViewProps> = ({
   const handleSaveEdit = async (id: number) => {
     setBusy(true);
     try {
-      await fetch(`/api/records/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(editDraft),
-      });
+      await updateRecordStatusOrFields(id, editDraft);
       setEditingId(null);
       await onRefresh();
     } finally {

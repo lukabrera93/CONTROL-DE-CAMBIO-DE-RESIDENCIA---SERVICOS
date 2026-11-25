@@ -13,16 +13,27 @@ import {
   X,
   Copy,
   Check,
+  Printer,
 } from 'lucide-react';
-import type { ResidenceRecord, RecordStatus } from '../types';
+import type { ResidenceRecord, RecordStatus, UploadBatch } from '../types';
+import {
+  updateRecordStatusOrFields,
+  createRecordEntry,
+  bulkUpdateStatus,
+  deleteRecordEntry,
+  downloadOfficialExcel,
+  markRecordsDispatched,
+} from '../lib/dataService';
 
 interface RecordsViewProps {
   records: ResidenceRecord[];
+  uploads?: UploadBatch[];
   availableMonths: string[];
   statusFilter: RecordStatus | 'all' | 'duplicates';
   onStatusFilterChange: (val: RecordStatus | 'all' | 'duplicates') => void;
   onRefresh: () => Promise<void>;
   onNavigateDuplicates: () => void;
+  onOpenPrintReport: () => void;
 }
 
 const EMPTY_FORM: Partial<ResidenceRecord> = {
@@ -43,14 +54,20 @@ const EMPTY_FORM: Partial<ResidenceRecord> = {
 
 export const RecordsView: React.FC<RecordsViewProps> = ({
   records,
+  uploads = [],
   availableMonths,
   statusFilter,
   onStatusFilterChange,
   onRefresh,
   onNavigateDuplicates,
+  onOpenPrintReport,
 }) => {
   const [search, setSearch] = useState('');
   const [monthFilter, setMonthFilter] = useState('all');
+  const [distritoFilter, setDistritoFilter] = useState('all');
+  const [servicioFilter, setServicioFilter] = useState('all');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -68,6 +85,57 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
   const [exportResponsable, setExportResponsable] = useState('');
   const [emailTo, setEmailTo] = useState('');
   const [copiedSummary, setCopiedSummary] = useState(false);
+  const [includeAlreadyDispatched, setIncludeAlreadyDispatched] = useState(false);
+  const [exportNotice, setExportNotice] = useState<{
+    type: 'ok' | 'info';
+    text: string;
+  } | null>(null);
+
+  const availableDistritos = useMemo(() => {
+    const set = new Set<string>();
+    for (const u of uploads) {
+      const val = (u.distrito || '').trim();
+      if (val) set.add(val);
+    }
+    for (const r of records) {
+      const val = (r.distrito || '').trim();
+      if (val) set.add(val);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'es'));
+  }, [records, uploads]);
+
+  const availableServicios = useMemo(() => {
+    const set = new Set<string>();
+    for (const u of uploads) {
+      const val = (u.servicio || '').trim();
+      if (val) set.add(val);
+    }
+    for (const r of records) {
+      const val = (r.servicio_planilla || '').trim();
+      if (val) set.add(val);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'es'));
+  }, [records, uploads]);
+
+  const matchesDimensionFilters = (r: ResidenceRecord) => {
+    if (monthFilter !== 'all' && r.month_key !== monthFilter) {
+      return false;
+    }
+    if (distritoFilter !== 'all' && r.distrito !== distritoFilter) {
+      return false;
+    }
+    if (servicioFilter !== 'all' && r.servicio_planilla !== servicioFilter) {
+      return false;
+    }
+    const createdDate = (r.created_at || '').slice(0, 10);
+    if (dateFrom && createdDate < dateFrom) {
+      return false;
+    }
+    if (dateTo && createdDate > dateTo) {
+      return false;
+    }
+    return true;
+  };
 
   const filteredRecords = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -77,30 +145,58 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
       } else if (statusFilter !== 'all') {
         if (r.status !== statusFilter) return false;
       }
-      if (monthFilter !== 'all' && r.month_key !== monthFilter) {
-        return false;
-      }
+      if (!matchesDimensionFilters(r)) return false;
       if (q) {
         const hay = `${r.documento} ${r.codigo_nro} ${r.nombres} ${r.apellidos} ${r.barrio_residencia} ${r.servicio_figura} ${r.servicio_corresponde} ${r.distrito} ${r.responsable}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
-  }, [records, statusFilter, monthFilter, search]);
+  }, [records, statusFilter, monthFilter, distritoFilter, servicioFilter, dateFrom, dateTo, search]);
 
-  const otroDeptoCount = useMemo(
-    () => records.filter((r) => r.status === 'otro_departamento').length,
-    [records]
+  const hasActiveFilters =
+    Boolean(search.trim()) ||
+    monthFilter !== 'all' ||
+    distritoFilter !== 'all' ||
+    servicioFilter !== 'all' ||
+    Boolean(dateFrom) ||
+    Boolean(dateTo);
+
+  const clearDimensionFilters = () => {
+    setSearch('');
+    setMonthFilter('all');
+    setDistritoFilter('all');
+    setServicioFilter('all');
+    setDateFrom('');
+    setDateTo('');
+  };
+
+  const otroDeptoPendingCount = useMemo(
+    () =>
+      records.filter(
+        (r) =>
+          r.status === 'otro_departamento' &&
+          !r.dispatched_at &&
+          matchesDimensionFilters(r)
+      ).length,
+    [records, monthFilter, distritoFilter, servicioFilter, dateFrom, dateTo]
+  );
+
+  const otroDeptoAlreadyDispatchedCount = useMemo(
+    () =>
+      records.filter(
+        (r) =>
+          r.status === 'otro_departamento' &&
+          Boolean(r.dispatched_at) &&
+          matchesDimensionFilters(r)
+      ).length,
+    [records, monthFilter, distritoFilter, servicioFilter, dateFrom, dateTo]
   );
 
   const handleStatusChange = async (id: number, status: RecordStatus) => {
     setBusyId(id);
     try {
-      await fetch(`/api/records/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status }),
-      });
+      await updateRecordStatusOrFields(id, { status });
       await onRefresh();
     } finally {
       setBusyId(null);
@@ -111,11 +207,7 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
     if (selectedIds.length === 0) return;
     setBulkBusy(true);
     try {
-      await fetch('/api/records/bulk-status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: selectedIds, status }),
-      });
+      await bulkUpdateStatus(selectedIds, status);
       setSelectedIds([]);
       await onRefresh();
     } finally {
@@ -126,7 +218,7 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
   const handleDelete = async (id: number) => {
     setBusyId(id);
     try {
-      await fetch(`/api/records/${id}`, { method: 'DELETE' });
+      await deleteRecordEntry(id);
       setSelectedIds((prev) => prev.filter((x) => x !== id));
       await onRefresh();
     } finally {
@@ -151,17 +243,9 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
     setFormSaving(true);
     try {
       if (editingRecord) {
-        await fetch(`/api/records/${editingRecord.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(formData),
-        });
+        await updateRecordStatusOrFields(editingRecord.id, formData);
       } else {
-        await fetch('/api/records', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(formData),
-        });
+        await createRecordEntry(formData);
       }
       setModalOpen(false);
       await onRefresh();
@@ -171,23 +255,72 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
   };
 
   const openEmailDispatchModal = () => {
-    const otroRecs = records.filter((r) => r.status === 'otro_departamento');
-    const first = otroRecs[0] || records[0];
-    setExportDistrito(first?.distrito || '');
-    setExportServicio(first?.servicio_planilla || first?.servicio_figura || '');
+    const otroRecs = records.filter(
+      (r) =>
+        r.status === 'otro_departamento' &&
+        !r.dispatched_at &&
+        matchesDimensionFilters(r)
+    );
+    const first =
+      otroRecs[0] ||
+      records.find((r) => r.status === 'otro_departamento' && matchesDimensionFilters(r)) ||
+      records[0];
+    setExportDistrito(distritoFilter !== 'all' ? distritoFilter : first?.distrito || '');
+    setExportServicio(
+      servicioFilter !== 'all'
+        ? servicioFilter
+        : first?.servicio_planilla || first?.servicio_figura || ''
+    );
     setExportResponsable(first?.responsable || '');
+    setIncludeAlreadyDispatched(false);
     setEmailModalOpen(true);
   };
 
-  const buildExcelExportUrl = (statusParam: string) => {
-    const params = new URLSearchParams({
-      status: statusParam,
-      month: monthFilter,
+  const handleExportOtroDepartamento = async (opts?: {
+    distrito?: string;
+    servicio?: string;
+    responsable?: string;
+    includeDispatched?: boolean;
+  }) => {
+    const res = await downloadOfficialExcel({
+      records,
+      statusFilter: 'otro_departamento',
+      monthFilter,
+      distritoFilter,
+      servicioFilter,
+      dateFrom,
+      dateTo,
+      distrito: opts?.distrito,
+      servicio: opts?.servicio,
+      responsable: opts?.responsable,
+      includeDispatched: opts?.includeDispatched,
     });
-    if (exportDistrito.trim()) params.set('distrito', exportDistrito.trim());
-    if (exportServicio.trim()) params.set('servicio', exportServicio.trim());
-    if (exportResponsable.trim()) params.set('responsable', exportResponsable.trim());
-    return `/api/export/excel?${params.toString()}`;
+
+    if (res.exportedCount === 0) {
+      setExportNotice({
+        type: 'info',
+        text:
+          res.skippedDispatched > 0
+            ? `Los ${res.skippedDispatched} registro(s) de otro departamento de este filtro ya fueron remitidos anteriormente. Si necesita reenviar alguno, use "Reabrir envío" en la tabla.`
+            : 'No hay registros pendientes marcados como "De otro departamento" para exportar con los filtros actuales.',
+      });
+    } else {
+      setExportNotice({
+        type: 'ok',
+        text: `Planilla descargada con ${res.exportedCount} registro(s). Quedaron marcados como remitidos para que no vuelvan a incluirse en la próxima descarga.`,
+      });
+      await onRefresh();
+    }
+  };
+
+  const handleReopenDispatch = async (id: number) => {
+    setBusyId(id);
+    try {
+      await markRecordsDispatched([id], null);
+      await onRefresh();
+    } finally {
+      setBusyId(null);
+    }
   };
 
   const otroDeptoRows = useMemo(
@@ -195,9 +328,10 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
       records.filter(
         (r) =>
           r.status === 'otro_departamento' &&
-          (monthFilter === 'all' || r.month_key === monthFilter)
+          (includeAlreadyDispatched || !r.dispatched_at) &&
+          matchesDimensionFilters(r)
       ),
-    [records, monthFilter]
+    [records, monthFilter, distritoFilter, servicioFilter, dateFrom, dateTo, includeAlreadyDispatched]
   );
 
   const emailSubject = `Remisión de Planilla Cambio de Residencia - ${
@@ -272,16 +406,15 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
 
           {/* Primary Actions */}
           <div className="flex flex-wrap items-center gap-2">
-            <a
-              href={`/api/export/excel?status=otro_departamento&month=${encodeURIComponent(
-                monthFilter
-              )}`}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-rose-700 text-white text-xs font-medium rounded-lg hover:bg-rose-800 transition-colors whitespace-nowrap shrink-0"
-              title="Descarga planilla Excel idéntica al formato oficial solo con los marcados 'De otro departamento'"
+            <button
+              type="button"
+              onClick={() => handleExportOtroDepartamento()}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-rose-700 text-white text-xs font-medium rounded-lg hover:bg-rose-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              title="Descarga solo los registros 'De otro departamento' aún no remitidos y los marca como enviados"
             >
               <Download className="w-3.5 h-3.5" />
-              Excel Otro Dpto. ({otroDeptoCount})
-            </a>
+              Excel Otro Dpto. ({otroDeptoPendingCount})
+            </button>
 
             <button
               type="button"
@@ -290,6 +423,15 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
             >
               <Mail className="w-3.5 h-3.5 text-teal-700" />
               Remitir por Correo
+            </button>
+
+            <button
+              type="button"
+              onClick={onOpenPrintReport}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white border border-slate-300 text-slate-700 text-xs font-medium rounded-lg hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Printer className="w-3.5 h-3.5 text-teal-700" />
+              Imprimir Informe
             </button>
 
             <button
@@ -303,42 +445,136 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
           </div>
         </div>
 
-        {/* Search & Month */}
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
-          <div className="relative flex-1">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Buscar por documento, código, nombres, apellidos, barrio o servicio..."
-              className="w-full pl-9 pr-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:ring-2 focus:ring-teal-600"
-            />
+        {/* Search & Dimension Filters (Distrito, Servicio, Fecha) */}
+        <div className="space-y-3">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+            <div className="relative flex-1">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Buscar por documento, código, nombres, apellidos, barrio o servicio..."
+                className="w-full pl-9 pr-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:ring-2 focus:ring-teal-600"
+              />
+            </div>
+
+            <button
+              type="button"
+              onClick={() =>
+                downloadOfficialExcel({
+                  records,
+                  statusFilter: statusFilter === 'duplicates' ? 'all' : statusFilter,
+                  monthFilter,
+                  distritoFilter,
+                  servicioFilter,
+                  dateFrom,
+                  dateTo,
+                })
+              }
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-white border border-slate-200 text-slate-700 text-xs font-medium rounded-lg hover:bg-slate-50 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Exportar Vista
+            </button>
           </div>
 
-          <select
-            value={monthFilter}
-            onChange={(e) => setMonthFilter(e.target.value)}
-            className="px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-600 font-mono"
-            aria-label="Filtrar por mes"
-          >
-            <option value="all">Todos los meses</option>
-            {availableMonths.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5 items-end">
+            <div>
+              <label className="block text-[11px] font-medium text-slate-500 mb-1">
+                Distrito
+              </label>
+              <select
+                value={distritoFilter}
+                onChange={(e) => setDistritoFilter(e.target.value)}
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:ring-2 focus:ring-teal-600"
+                aria-label="Filtrar por distrito"
+              >
+                <option value="all">Todos los distritos</option>
+                {availableDistritos.map((d) => (
+                  <option key={d} value={d}>
+                    {d}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-          <a
-            href={`/api/export/excel?status=${encodeURIComponent(
-              statusFilter === 'duplicates' ? 'all' : statusFilter
-            )}&month=${encodeURIComponent(monthFilter)}`}
-            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-white border border-slate-200 text-slate-700 text-xs font-medium rounded-lg hover:bg-slate-50 whitespace-nowrap shrink-0"
-          >
-            <Download className="w-3.5 h-3.5" />
-            Exportar Vista
-          </a>
+            <div>
+              <label className="block text-[11px] font-medium text-slate-500 mb-1">
+                Servicio
+              </label>
+              <select
+                value={servicioFilter}
+                onChange={(e) => setServicioFilter(e.target.value)}
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:ring-2 focus:ring-teal-600"
+                aria-label="Filtrar por servicio"
+              >
+                <option value="all">Todos los servicios</option>
+                {availableServicios.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-medium text-slate-500 mb-1">
+                Mes de Planilla
+              </label>
+              <select
+                value={monthFilter}
+                onChange={(e) => setMonthFilter(e.target.value)}
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:ring-2 focus:ring-teal-600 font-mono"
+                aria-label="Filtrar por mes"
+              >
+                <option value="all">Todos los meses</option>
+                {availableMonths.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-medium text-slate-500 mb-1">
+                Fecha desde
+              </label>
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:ring-2 focus:ring-teal-600 font-mono"
+                aria-label="Filtrar fecha desde"
+              />
+            </div>
+
+            <div className="flex items-end gap-2">
+              <div className="flex-1 min-w-0">
+                <label className="block text-[11px] font-medium text-slate-500 mb-1">
+                  Fecha hasta
+                </label>
+                <input
+                  type="date"
+                  value={dateTo}
+                  onChange={(e) => setDateTo(e.target.value)}
+                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:ring-2 focus:ring-teal-600 font-mono"
+                  aria-label="Filtrar fecha hasta"
+                />
+              </div>
+              {hasActiveFilters && (
+                <button
+                  type="button"
+                  onClick={clearDimensionFilters}
+                  className="px-2.5 py-2 text-xs text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap shrink-0 cursor-pointer"
+                  title="Limpiar todos los filtros"
+                >
+                  Limpiar
+                </button>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Bulk Selection Bar */}
@@ -380,6 +616,26 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
                 Limpiar
               </button>
             </div>
+          </div>
+        )}
+
+        {exportNotice && (
+          <div
+            className={`p-3 rounded-lg border text-xs flex items-center justify-between gap-3 ${
+              exportNotice.type === 'ok'
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-950'
+                : 'bg-slate-50 border-slate-200 text-slate-800'
+            }`}
+          >
+            <span>{exportNotice.text}</span>
+            <button
+              type="button"
+              onClick={() => setExportNotice(null)}
+              className="p-1 text-slate-500 hover:text-slate-900 cursor-pointer shrink-0"
+              aria-label="Cerrar aviso"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
           </div>
         )}
       </div>
@@ -475,6 +731,7 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
                       </div>
                       <div className="text-[11px] text-slate-500">
                         {r.distrito || 'Sin distrito'} · {r.month_key}
+                        {r.created_at ? ` · ${r.created_at.slice(0, 10)}` : ''}
                       </div>
                     </td>
                     <td className="px-3 py-2.5 font-mono tabular-nums text-slate-700 whitespace-nowrap">
@@ -527,6 +784,27 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
                           Otro Dpto.
                         </button>
                       </div>
+                      {r.status === 'otro_departamento' && (
+                        <div className="mt-1 flex items-center gap-2 text-[11px]">
+                          {r.dispatched_at ? (
+                            <>
+                              <span className="font-mono tabular-nums text-emerald-700">
+                                Remitido · {new Date(r.dispatched_at).toLocaleDateString('es-ES')}
+                              </span>
+                              <button
+                                type="button"
+                                disabled={busyId === r.id}
+                                onClick={() => handleReopenDispatch(r.id)}
+                                className="text-slate-600 hover:text-slate-900 underline cursor-pointer"
+                              >
+                                Reabrir envío
+                              </button>
+                            </>
+                          ) : (
+                            <span className="text-rose-700">Pendiente de envío</span>
+                          )}
+                        </div>
+                      )}
                     </td>
                     <td className="px-3 py-2.5 text-right whitespace-nowrap">
                       <button
@@ -672,12 +950,25 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">
-                    Distrito
+                    Distrito (Planilla)
                   </label>
                   <input
                     type="text"
                     value={formData.distrito || ''}
                     onChange={(e) => setFormData((d) => ({ ...d, distrito: e.target.value }))}
+                    className="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    Servicio (Planilla)
+                  </label>
+                  <input
+                    type="text"
+                    value={formData.servicio_planilla || ''}
+                    onChange={(e) =>
+                      setFormData((d) => ({ ...d, servicio_planilla: e.target.value }))
+                    }
                     className="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md"
                   />
                 </div>
@@ -838,14 +1129,36 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
                 />
               </div>
 
+              {otroDeptoAlreadyDispatchedCount > 0 && (
+                <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={includeAlreadyDispatched}
+                    onChange={(e) => setIncludeAlreadyDispatched(e.target.checked)}
+                  />
+                  <span>
+                    Incluir también {otroDeptoAlreadyDispatchedCount} caso(s) ya remitido(s) anteriormente
+                  </span>
+                </label>
+              )}
+
               <div className="pt-2 flex flex-wrap items-center justify-between gap-3">
-                <a
-                  href={buildExcelExportUrl('otro_departamento')}
-                  className="inline-flex items-center gap-2 px-4 py-2 bg-rose-700 text-white text-xs font-medium rounded-lg hover:bg-rose-800 whitespace-nowrap"
+                <button
+                  type="button"
+                  disabled={otroDeptoRows.length === 0}
+                  onClick={() =>
+                    handleExportOtroDepartamento({
+                      distrito: exportDistrito.trim() || undefined,
+                      servicio: exportServicio.trim() || undefined,
+                      responsable: exportResponsable.trim() || undefined,
+                      includeDispatched: includeAlreadyDispatched,
+                    })
+                  }
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-rose-700 text-white text-xs font-medium rounded-lg hover:bg-rose-800 whitespace-nowrap cursor-pointer disabled:opacity-50"
                 >
                   <Download className="w-4 h-4" />
-                  1. Descargar Excel Oficial (.xlsx)
-                </a>
+                  1. Descargar Excel Oficial ({otroDeptoRows.length})
+                </button>
                 <a
                   href={`mailto:${encodeURIComponent(emailTo)}?subject=${encodeURIComponent(
                     emailSubject

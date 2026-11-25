@@ -1,9 +1,11 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
+import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { DatabaseSync } from 'node:sqlite';
+import zlib from 'node:zlib';
+import { createRequire } from 'node:module';
 import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
 import type {
@@ -25,11 +27,130 @@ const DB_PATH = path.resolve(DATA_DIR, 'resicontrol.db');
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const db = new DatabaseSync(DB_PATH);
-db.exec('PRAGMA journal_mode = WAL;');
-db.exec('PRAGMA foreign_keys = ON;');
+type SqlParam = string | number | null;
 
-db.exec(`
+interface DbStatement {
+  run: (...params: SqlParam[]) => { lastInsertRowid: number | bigint; changes: number | bigint };
+  get: (...params: SqlParam[]) => unknown;
+  all: (...params: SqlParam[]) => unknown[];
+}
+
+interface DbAdapter {
+  exec: (sql: string) => void;
+  prepare: (sql: string) => DbStatement;
+  engine: 'node:sqlite' | 'sql.js';
+}
+
+let db!: DbAdapter;
+
+async function createDbAdapter(dbPath: string): Promise<DbAdapter> {
+  try {
+    const sqliteMod = await import('node:sqlite');
+    const nativeDb = new sqliteMod.DatabaseSync(dbPath);
+    nativeDb.exec('PRAGMA journal_mode = WAL;');
+    nativeDb.exec('PRAGMA foreign_keys = ON;');
+    return {
+      engine: 'node:sqlite',
+      exec: (sql: string) => nativeDb.exec(sql),
+      prepare: (sql: string) => nativeDb.prepare(sql) as unknown as DbStatement,
+    };
+  } catch (err) {
+    console.warn(
+      'node:sqlite no disponible en esta versión de Node.js; usando motor SQLite compatible (sql.js):',
+      err instanceof Error ? err.message : err
+    );
+    const { default: initSqlJs } = await import('sql.js');
+    const req = createRequire(import.meta.url);
+    const wasmPath = req.resolve('sql.js/dist/sql-wasm.wasm');
+    const SQL = await initSqlJs({ locateFile: () => wasmPath });
+
+    const existingBuf = fs.existsSync(dbPath) ? new Uint8Array(fs.readFileSync(dbPath)) : undefined;
+    const wasmDb = existingBuf ? new SQL.Database(existingBuf) : new SQL.Database();
+    let inTx = false;
+
+    const persist = () => {
+      const data = Buffer.from(wasmDb.export());
+      const tmpPath = `${dbPath}.tmp`;
+      fs.writeFileSync(tmpPath, data);
+      fs.renameSync(tmpPath, dbPath);
+    };
+
+    const normalizeParams = (params: SqlParam[]) =>
+      params.map((p) => (p === undefined ? null : p));
+
+    return {
+      engine: 'sql.js',
+      exec: (sql: string) => {
+        const trimmed = sql.trim().toUpperCase();
+        if (trimmed === 'BEGIN' || trimmed.startsWith('BEGIN ')) {
+          wasmDb.exec(sql);
+          inTx = true;
+          return;
+        }
+        if (trimmed === 'COMMIT' || trimmed === 'END') {
+          wasmDb.exec(sql);
+          inTx = false;
+          persist();
+          return;
+        }
+        if (trimmed === 'ROLLBACK') {
+          wasmDb.exec(sql);
+          inTx = false;
+          return;
+        }
+        wasmDb.exec(sql);
+        if (!inTx && !trimmed.startsWith('PRAGMA') && !trimmed.startsWith('SELECT')) {
+          persist();
+        }
+      },
+      prepare: (sql: string): DbStatement => ({
+        run: (...params: SqlParam[]) => {
+          const stmt = wasmDb.prepare(sql);
+          try {
+            stmt.bind(normalizeParams(params));
+            stmt.step();
+          } finally {
+            stmt.free();
+          }
+          const changes = wasmDb.getRowsModified();
+          const rowRes = wasmDb.exec('SELECT last_insert_rowid() AS id');
+          const lastId = Number(rowRes[0]?.values?.[0]?.[0] ?? 0);
+          if (!inTx) persist();
+          return { lastInsertRowid: lastId, changes };
+        },
+        get: (...params: SqlParam[]) => {
+          const stmt = wasmDb.prepare(sql);
+          try {
+            stmt.bind(normalizeParams(params));
+            if (stmt.step()) {
+              return stmt.getAsObject();
+            }
+            return undefined;
+          } finally {
+            stmt.free();
+          }
+        },
+        all: (...params: SqlParam[]) => {
+          const stmt = wasmDb.prepare(sql);
+          const rows: unknown[] = [];
+          try {
+            stmt.bind(normalizeParams(params));
+            while (stmt.step()) {
+              rows.push(stmt.getAsObject());
+            }
+          } finally {
+            stmt.free();
+          }
+          return rows;
+        },
+      }),
+    };
+  }
+}
+
+async function initDatabaseAndSchema(): Promise<DbAdapter> {
+  const adapter = await createDbAdapter(DB_PATH);
+  adapter.exec(`
   CREATE TABLE IF NOT EXISTS records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     row_number INTEGER NOT NULL DEFAULT 1,
@@ -50,6 +171,7 @@ db.exec(`
     month_key TEXT NOT NULL,
     source_file TEXT NOT NULL DEFAULT '',
     notes TEXT NOT NULL DEFAULT '',
+    dispatched_at TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -110,6 +232,15 @@ db.exec(`
     last_updated TEXT NOT NULL
   );
 `);
+
+  // Safe migration for existing SQLite databases created before dispatched_at existed
+  const recordColumns = adapter.prepare('PRAGMA table_info(records)').all() as Array<{ name: string }>;
+  if (!recordColumns.some((c) => c.name === 'dispatched_at')) {
+    adapter.exec("ALTER TABLE records ADD COLUMN dispatched_at TEXT NOT NULL DEFAULT '';");
+  }
+
+  return adapter;
+}
 
 function currentMonthKey(): string {
   const now = new Date();
@@ -789,6 +920,7 @@ function getMetricsSnapshot(): ServerMetricsSnapshot {
 }
 
 async function startServer(): Promise<void> {
+  db = await initDatabaseAndSchema();
   const app = express();
   app.set('trust proxy', true);
 
@@ -849,7 +981,11 @@ async function startServer(): Promise<void> {
     try {
       const row = db.prepare('SELECT 1 AS ok').get() as { ok: number } | undefined;
       if (row?.ok === 1) {
-        res.json({ ready: true, database: 'sqlite-wal', timestamp: new Date().toISOString() });
+        res.json({
+          ready: true,
+          database: db.engine === 'node:sqlite' ? 'sqlite-wal' : 'sqljs-sqlite',
+          timestamp: new Date().toISOString(),
+        });
         return;
       }
       res.status(503).json({ ready: false });
@@ -886,6 +1022,10 @@ async function startServer(): Promise<void> {
   app.get('/api/records', (req: Request, res: Response) => {
     const statusFilter = typeof req.query.status === 'string' ? req.query.status : 'all';
     const monthFilter = typeof req.query.month === 'string' ? req.query.month : 'all';
+    const distritoFilter = typeof req.query.distrito === 'string' ? req.query.distrito : 'all';
+    const servicioFilter = typeof req.query.servicio === 'string' ? req.query.servicio : 'all';
+    const dateFrom = typeof req.query.dateFrom === 'string' ? req.query.dateFrom : '';
+    const dateTo = typeof req.query.dateTo === 'string' ? req.query.dateTo : '';
     const search = typeof req.query.q === 'string' ? normalizeText(req.query.q) : '';
     const onlyDuplicates = req.query.duplicates === 'true';
 
@@ -896,6 +1036,18 @@ async function startServer(): Promise<void> {
     }
     if (monthFilter !== 'all') {
       records = records.filter((r) => r.month_key === monthFilter);
+    }
+    if (distritoFilter !== 'all') {
+      records = records.filter((r) => r.distrito === distritoFilter);
+    }
+    if (servicioFilter !== 'all') {
+      records = records.filter((r) => r.servicio_planilla === servicioFilter);
+    }
+    if (dateFrom) {
+      records = records.filter((r) => (r.created_at || '').slice(0, 10) >= dateFrom);
+    }
+    if (dateTo) {
+      records = records.filter((r) => (r.created_at || '').slice(0, 10) <= dateTo);
     }
     if (onlyDuplicates) {
       records = records.filter((r) => r.is_duplicate);
@@ -1135,6 +1287,51 @@ async function startServer(): Promise<void> {
     });
     broadcastSse('data_changed', { reason: 'bulk_status', count: ids.length });
     res.json({ ok: true, updated: ids.length });
+  });
+
+  // Mark or unmark records as remitted (dispatched_at)
+  app.post('/api/records/mark-dispatched', limitHeavy, (req: Request, res: Response) => {
+    const body = req.body as { ids?: unknown; dispatchedAt?: string | null };
+    const ids = Array.isArray(body.ids)
+      ? body.ids.map(Number).filter((x) => Number.isInteger(x) && x > 0)
+      : [];
+    if (ids.length === 0) {
+      res.status(400).json({ error: 'No se indicaron registros para actualizar.' });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const dispatchedVal =
+      body.dispatchedAt === null || body.dispatchedAt === ''
+        ? ''
+        : typeof body.dispatchedAt === 'string' && body.dispatchedAt.trim()
+        ? body.dispatchedAt.trim()
+        : now;
+
+    const stmt = db.prepare(
+      'UPDATE records SET dispatched_at = ?, updated_at = ? WHERE id = ?'
+    );
+    db.exec('BEGIN');
+    try {
+      for (const id of ids) {
+        stmt.run(dispatchedVal, now, id);
+      }
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+
+    addSystemLog(
+      'INFO',
+      'EXPORT',
+      dispatchedVal
+        ? `${ids.length} registro(s) marcado(s) como remitido(s) para evitar reenvío`
+        : `${ids.length} registro(s) reabierto(s) para remisión`,
+      { count: ids.length, dispatchedVal }
+    );
+    broadcastSse('data_changed', { reason: 'records_dispatched', count: ids.length });
+    res.json({ ok: true, updated: ids.length, dispatched_at: dispatchedVal });
   });
 
   // Delete single record
@@ -1425,11 +1622,16 @@ async function startServer(): Promise<void> {
   app.get('/api/export/excel', async (req: Request, res: Response) => {
     const statusFilter = typeof req.query.status === 'string' ? req.query.status : 'otro_departamento';
     const monthFilter = typeof req.query.month === 'string' ? req.query.month : 'all';
+    const distritoFilter = typeof req.query.distritoFilter === 'string' ? req.query.distritoFilter : 'all';
+    const servicioFilter = typeof req.query.servicioFilter === 'string' ? req.query.servicioFilter : 'all';
+    const dateFrom = typeof req.query.dateFrom === 'string' ? req.query.dateFrom : '';
+    const dateTo = typeof req.query.dateTo === 'string' ? req.query.dateTo : '';
     const distritoOverride = typeof req.query.distrito === 'string' ? req.query.distrito : undefined;
     const servicioOverride = typeof req.query.servicio === 'string' ? req.query.servicio : undefined;
     const responsableOverride =
       typeof req.query.responsable === 'string' ? req.query.responsable : undefined;
     const blankTemplate = req.query.template === 'true';
+    const includeDispatched = req.query.includeDispatched === 'true';
 
     let records: ResidenceRecord[] = [];
     if (!blankTemplate) {
@@ -1439,6 +1641,21 @@ async function startServer(): Promise<void> {
       }
       if (monthFilter !== 'all') {
         records = records.filter((r) => r.month_key === monthFilter);
+      }
+      if (distritoFilter !== 'all') {
+        records = records.filter((r) => r.distrito === distritoFilter);
+      }
+      if (servicioFilter !== 'all') {
+        records = records.filter((r) => r.servicio_planilla === servicioFilter);
+      }
+      if (dateFrom) {
+        records = records.filter((r) => (r.created_at || '').slice(0, 10) >= dateFrom);
+      }
+      if (dateTo) {
+        records = records.filter((r) => (r.created_at || '').slice(0, 10) <= dateTo);
+      }
+      if (statusFilter === 'otro_departamento' && !includeDispatched) {
+        records = records.filter((r) => !r.dispatched_at);
       }
     }
 
@@ -1450,6 +1667,26 @@ async function startServer(): Promise<void> {
       minRows: 25,
     });
 
+    const now = new Date().toISOString();
+    if (!blankTemplate && statusFilter === 'otro_departamento' && records.length > 0) {
+      const markStmt = db.prepare(
+        'UPDATE records SET dispatched_at = ?, updated_at = ? WHERE id = ?'
+      );
+      db.exec('BEGIN');
+      try {
+        for (const r of records) {
+          if (!r.dispatched_at) {
+            markStmt.run(now, now, r.id);
+          }
+        }
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+      broadcastSse('data_changed', { reason: 'records_dispatched', count: records.length });
+    }
+
     const mk = currentMonthKey();
     db.prepare(`
       INSERT INTO monthly_server_metrics (month_key, exports_generated, last_updated)
@@ -1457,7 +1694,7 @@ async function startServer(): Promise<void> {
       ON CONFLICT(month_key) DO UPDATE SET
         exports_generated = exports_generated + 1,
         last_updated = excluded.last_updated
-    `).run(mk, new Date().toISOString());
+    `).run(mk, now);
 
     const labelPart = blankTemplate
       ? 'PLANTILLA'
@@ -2132,31 +2369,427 @@ async function startServer(): Promise<void> {
     res.json({ ok: true, count: sampleRows.length });
   });
 
+  // Download complete local package (.zip) with Windows/Mac/Linux launchers
+  app.get('/api/download-local', limitHeavy, (_req: Request, res: Response) => {
+    const crcTable = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      crcTable[i] = c >>> 0;
+    }
+    const crc32 = (buf: Buffer): number => {
+      let crc = 0xffffffff;
+      for (let i = 0; i < buf.length; i++) {
+        crc = crcTable[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+      }
+      return (crc ^ 0xffffffff) >>> 0;
+    };
+
+    const zipEntries: Array<{ name: string; data: Buffer; executable?: boolean }> = [];
+    const allowedTopEntries = [
+      'package.json',
+      'index.html',
+      'tsconfig.json',
+      'vite.config.ts',
+      'server.ts',
+      'README.md',
+      'Dockerfile',
+      '.env.example',
+      '.gitignore',
+      'metadata.json',
+      'src',
+      'public',
+      '.github',
+      'dist',
+    ];
+
+    const collectFiles = (relPath: string) => {
+      const full = path.resolve(ROOT_DIR, relPath);
+      if (full !== ROOT_DIR && !full.startsWith(ROOT_DIR + path.sep)) return;
+      if (!fs.existsSync(full)) return;
+      const stat = fs.statSync(full);
+      const posixRel = relPath.replace(/\\/g, '/');
+      if (stat.isDirectory()) {
+        const base = path.basename(full);
+        if (['node_modules', 'data', '.git', 'dev-dist'].includes(base)) return;
+        for (const child of fs.readdirSync(full)) {
+          collectFiles(path.join(relPath, child));
+        }
+      } else if (stat.isFile()) {
+        if (posixRel.startsWith('.env') && posixRel !== '.env.example') return;
+        if (posixRel === '.local-url') return;
+        if (posixRel.includes('public/assets/aistudio')) return;
+        zipEntries.push({
+          name: `ResiControl/${posixRel}`,
+          data: fs.readFileSync(full),
+        });
+      }
+    };
+
+    for (const item of allowedTopEntries) {
+      collectFiles(item);
+    }
+
+    const openBrowserScript = [
+      "import fs from 'node:fs';",
+      "import http from 'node:http';",
+      "import { exec } from 'node:child_process';",
+      '',
+      'const readTargetUrl = () => {',
+      '  try {',
+      "    if (fs.existsSync('.local-url')) {",
+      "      const val = fs.readFileSync('.local-url', 'utf8').trim();",
+      '      if (val) return val;',
+      '    }',
+      '  } catch {}',
+      "  return 'http://localhost:3000';",
+      '};',
+      '',
+      'const openUrl = (url) => {',
+      "  if (process.platform === 'win32') {",
+      "    exec(`start \"\" \"${url}\"`);",
+      "  } else if (process.platform === 'darwin') {",
+      "    exec(`open \"${url}\"`);",
+      '  } else {',
+      "    exec(`xdg-open \"${url}\"`);",
+      '  }',
+      '};',
+      '',
+      'let attempts = 0;',
+      'const timer = setInterval(() => {',
+      '  attempts += 1;',
+      '  const target = readTargetUrl();',
+      '  let port = 3000;',
+      '  try {',
+      '    port = Number(new URL(target).port) || 3000;',
+      '  } catch {}',
+      '  const req = http.get(',
+      "    { hostname: '127.0.0.1', port, path: '/api/health', timeout: 1000 },",
+      '    (res) => {',
+      '      res.resume();',
+      '      if (res.statusCode === 200) {',
+      '        clearInterval(timer);',
+      '        openUrl(target);',
+      '      }',
+      '    }',
+      '  );',
+      '  req.on(\'error\', () => {});',
+      '  if (attempts >= 90) clearInterval(timer);',
+      '}, 500);',
+    ].join('\n');
+
+    const winBat = [
+      '@echo off',
+      'setlocal EnableExtensions',
+      'chcp 65001 >nul',
+      'cd /d "%~dp0"',
+      'title ResiControl - Servidor Local',
+      '',
+      'echo ==================================================',
+      'echo   ResiControl - Iniciando Servidor Local',
+      'echo ==================================================',
+      'echo.',
+      '',
+      'where node >nul 2>nul',
+      'if %errorlevel% neq 0 (',
+      '  echo [ERROR] Necesita instalar Node.js v18, v20 o v22+ desde https://nodejs.org',
+      '  pause',
+      '  exit /b 1',
+      ')',
+      '',
+      'for /f "delims=" %%v in (\'node -p "process.versions.node.split(\'.\')[0]"\') do set NODE_MAJOR=%%v',
+      'if %NODE_MAJOR% LSS 18 (',
+      '  echo [ERROR] Su version de Node.js ^(%NODE_MAJOR%^) es muy antigua.',
+      '  echo Descargue Node.js LTS desde https://nodejs.org',
+      '  pause',
+      '  exit /b 1',
+      ')',
+      '',
+      'set "NEED_INSTALL=0"',
+      'if not exist "node_modules\\express" set "NEED_INSTALL=1"',
+      'if not exist "node_modules\\tsx" set "NEED_INSTALL=1"',
+      'if not exist "node_modules\\sql.js" set "NEED_INSTALL=1"',
+      'if not exist "node_modules\\exceljs" set "NEED_INSTALL=1"',
+      'if not exist "node_modules\\xlsx" set "NEED_INSTALL=1"',
+      '',
+      'if "%NEED_INSTALL%"=="1" (',
+      '  echo Instalando dependencias necesarias ^(solo la primera vez^)...',
+      '  set "NODE_ENV="',
+      '  call npm install --include=dev --no-audit --no-fund',
+      '  if errorlevel 1 (',
+      '    echo Reintentando instalacion compatible de dependencias...',
+      '    call npm install --include=dev --legacy-peer-deps --no-audit --no-fund',
+      '  )',
+      '  if errorlevel 1 (',
+      '    echo.',
+      '    echo [ERROR] No se pudieron instalar las dependencias.',
+      '    echo Verifique su conexion a internet e intente nuevamente.',
+      '    pause',
+      '    exit /b 1',
+      '  )',
+      ')',
+      '',
+      'if not exist "dist\\index.html" (',
+      '  echo Compilando aplicacion por primera vez...',
+      '  set "NODE_ENV="',
+      '  call npm run build',
+      '  if errorlevel 1 (',
+      '    echo.',
+      '    echo [ERROR] Fallo la compilacion de la aplicacion.',
+      '    pause',
+      '    exit /b 1',
+      '  )',
+      ')',
+      '',
+      'if exist ".local-url" del /f /q ".local-url" >nul 2>nul',
+      'echo Iniciando servidor local...',
+      'start "" /b node open-browser.mjs',
+      '',
+      'set "NODE_ENV=production"',
+      'set "RESICONTROL_LOCAL=1"',
+      'if exist "node_modules\\.bin\\tsx.cmd" (',
+      '  call "node_modules\\.bin\\tsx.cmd" server.ts',
+      ') else (',
+      '  node server.ts',
+      ')',
+      '',
+      'if errorlevel 1 (',
+      '  echo.',
+      '  echo [ERROR] El servidor se detuvo con errores.',
+      '  pause',
+      ')',
+    ].join('\r\n');
+
+    const shScript = [
+      '#!/usr/bin/env bash',
+      'set -e',
+      'cd "$(dirname "$0")"',
+      'if ! command -v node >/dev/null 2>&1; then',
+      '  echo "[ERROR] Instale Node.js v18, v20 o v22+ desde https://nodejs.org"',
+      '  exit 1',
+      'fi',
+      'NODE_MAJOR=$(node -p "process.versions.node.split(\'.\')[0]")',
+      'if [ "$NODE_MAJOR" -lt 18 ]; then',
+      '  echo "[ERROR] Su version de Node.js ($NODE_MAJOR) es muy antigua. Instale Node.js LTS desde https://nodejs.org"',
+      '  exit 1',
+      'fi',
+      'if [ ! -d "node_modules/express" ] || [ ! -d "node_modules/tsx" ] || [ ! -d "node_modules/sql.js" ] || [ ! -d "node_modules/exceljs" ]; then',
+      '  echo "Instalando dependencias por primera vez..."',
+      '  NODE_ENV= npm install --include=dev --no-audit --no-fund || NODE_ENV= npm install --include=dev --legacy-peer-deps --no-audit --no-fund',
+      'fi',
+      'if [ ! -f "dist/index.html" ]; then',
+      '  echo "Compilando aplicacion por primera vez..."',
+      '  NODE_ENV= npm run build',
+      'fi',
+      'rm -f .local-url',
+      'echo "Iniciando ResiControl de manera local..."',
+      'node open-browser.mjs &',
+      'if [ -x "./node_modules/.bin/tsx" ]; then',
+      '  NODE_ENV=production RESICONTROL_LOCAL=1 ./node_modules/.bin/tsx server.ts',
+      'else',
+      '  NODE_ENV=production RESICONTROL_LOCAL=1 node server.ts',
+      'fi',
+    ].join('\n');
+
+    const guideTxt = [
+      'RESICONTROL - INSTALACION LOCAL Y USO SIN INTERNET',
+      '==================================================',
+      '',
+      'REQUISITO PREVIO (solo la primera vez):',
+      '- Instalar Node.js LTS (v20, v22 o superior) desde https://nodejs.org',
+      '',
+      'EN WINDOWS:',
+      '1. Descomprima TODO el archivo ZIP en una carpeta (ej. C:\\ResiControl).',
+      '   (No ejecute INICIAR_WINDOWS.bat desde adentro del ZIP sin descomprimir).',
+      '2. Haga doble clic en INICIAR_WINDOWS.bat',
+      '3. La primera vez instalara las dependencias y abrira automaticamente el navegador.',
+      '4. En los siguientes usos iniciara al instante y funcionara 100% sin internet.',
+      '',
+      'EN MAC / LINUX:',
+      '1. Descomprima la carpeta y ejecute: chmod +x iniciar_mac_linux.sh && ./iniciar_mac_linux.sh',
+      '',
+      'INSTALACION COMO APP (PWA):',
+      '- Una vez abierto en Chrome o Edge, puede instalarlo en su escritorio desde el boton',
+      '  "Descargar e Instalar Local" -> "Instalar App Ahora".',
+    ].join('\r\n');
+
+    zipEntries.push({ name: 'ResiControl/open-browser.mjs', data: Buffer.from(openBrowserScript, 'utf8') });
+    zipEntries.push({ name: 'ResiControl/INICIAR_WINDOWS.bat', data: Buffer.from(winBat, 'utf8') });
+    zipEntries.push({ name: 'ResiControl/iniciar_mac_linux.sh', data: Buffer.from(shScript, 'utf8'), executable: true });
+    zipEntries.push({ name: 'ResiControl/LEEME_INSTALACION.txt', data: Buffer.from(guideTxt, 'utf8') });
+
+    const now = new Date();
+    const dosTime =
+      (((now.getHours() & 0x1f) << 11) |
+        ((now.getMinutes() & 0x3f) << 5) |
+        ((now.getSeconds() >> 1) & 0x1f)) >>>
+      0;
+    const dosDate =
+      ((((Math.max(1980, now.getFullYear()) - 1980) & 0x7f) << 9) |
+        (((now.getMonth() + 1) & 0x0f) << 5) |
+        (now.getDate() & 0x1f)) >>>
+      0;
+
+    const localParts: Buffer[] = [];
+    const centralParts: Buffer[] = [];
+    let offset = 0;
+
+    for (const entry of zipEntries) {
+      const nameBuf = Buffer.from(entry.name, 'utf8');
+      const compressed = zlib.deflateRawSync(entry.data);
+      const crc = crc32(entry.data);
+
+      const lfh = Buffer.alloc(30);
+      lfh.writeUInt32LE(0x04034b50, 0);
+      lfh.writeUInt16LE(20, 4);
+      lfh.writeUInt16LE(0x0800, 6); // UTF-8 flag
+      lfh.writeUInt16LE(8, 8); // deflate
+      lfh.writeUInt16LE(dosTime, 10);
+      lfh.writeUInt16LE(dosDate, 12);
+      lfh.writeUInt32LE(crc >>> 0, 14);
+      lfh.writeUInt32LE(compressed.length >>> 0, 18);
+      lfh.writeUInt32LE(entry.data.length >>> 0, 22);
+      lfh.writeUInt16LE(nameBuf.length, 26);
+      lfh.writeUInt16LE(0, 28);
+
+      localParts.push(lfh, nameBuf, compressed);
+
+      const cdh = Buffer.alloc(46);
+      cdh.writeUInt32LE(0x02014b50, 0);
+      cdh.writeUInt16LE(entry.executable ? 0x0314 : 20, 4);
+      cdh.writeUInt16LE(20, 6);
+      cdh.writeUInt16LE(0x0800, 8);
+      cdh.writeUInt16LE(8, 10);
+      cdh.writeUInt16LE(dosTime, 12);
+      cdh.writeUInt16LE(dosDate, 14);
+      cdh.writeUInt32LE(crc >>> 0, 16);
+      cdh.writeUInt32LE(compressed.length >>> 0, 20);
+      cdh.writeUInt32LE(entry.data.length >>> 0, 24);
+      cdh.writeUInt16LE(nameBuf.length, 28);
+      cdh.writeUInt16LE(0, 30);
+      cdh.writeUInt16LE(0, 32);
+      cdh.writeUInt16LE(0, 34);
+      cdh.writeUInt16LE(0, 36);
+      cdh.writeUInt32LE(entry.executable ? (0o100755 << 16) >>> 0 : 0, 38);
+      cdh.writeUInt32LE(offset >>> 0, 42);
+
+      centralParts.push(cdh, nameBuf);
+      offset += lfh.length + nameBuf.length + compressed.length;
+    }
+
+    const centralBuf = Buffer.concat(centralParts);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(0, 4);
+    eocd.writeUInt16LE(0, 6);
+    eocd.writeUInt16LE(zipEntries.length, 8);
+    eocd.writeUInt16LE(zipEntries.length, 10);
+    eocd.writeUInt32LE(centralBuf.length, 12);
+    eocd.writeUInt32LE(offset, 16);
+    eocd.writeUInt16LE(0, 20);
+
+    const finalZip = Buffer.concat([...localParts, centralBuf, eocd]);
+    addSystemLog('INFO', 'SYSTEM', 'Paquete instalador local ResiControl_Local.zip descargado', {
+      files: zipEntries.length,
+      sizeBytes: finalZip.length,
+    });
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="ResiControl_Local.zip"');
+    res.send(finalZip);
+  });
+
   // Boot log
-  addSystemLog('INFO', 'SYSTEM', 'Servidor ResiControl iniciado con base de datos SQLite WAL', {
+  addSystemLog('INFO', 'SYSTEM', `Servidor ResiControl iniciado (${db.engine})`, {
     port: PORT,
     nodeVersion: process.version,
+    dbEngine: db.engine,
   });
 
   // Vite dev middleware or static dist serving
-  if (!IS_PROD) {
+  const distPath = path.resolve(ROOT_DIR, 'dist');
+  const distIndex = path.join(distPath, 'index.html');
+  if (IS_PROD && fs.existsSync(distIndex)) {
+    app.use(express.static(distPath));
+    app.get('*', (_req: Request, res: Response) => {
+      res.sendFile(distIndex);
+    });
+  } else {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
-  } else {
-    const distPath = path.resolve(ROOT_DIR, 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req: Request, res: Response) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`ResiControl server listening on http://0.0.0.0:${PORT}`);
-  });
+  const isLocalLaunch = process.env.RESICONTROL_LOCAL === '1' || !process.env.K_SERVICE;
+  const checkExistingResiControl = (portToCheck: number): Promise<boolean> =>
+    new Promise((resolve) => {
+      const req = http.get(
+        { hostname: '127.0.0.1', port: portToCheck, path: '/api/health', timeout: 800 },
+        (resp) => {
+          let raw = '';
+          resp.on('data', (chunk) => {
+            raw += chunk;
+          });
+          resp.on('end', () => {
+            resolve(resp.statusCode === 200 && raw.includes('ResiControl'));
+          });
+        }
+      );
+      req.on('error', () => resolve(false));
+      req.on('timeout', () => {
+        req.destroy();
+        resolve(false);
+      });
+    });
+
+  const bindServer = (targetPort: number, forceIpv4Only = false): void => {
+    const srv = http.createServer(app);
+    srv.once('error', async (err: NodeJS.ErrnoException) => {
+      if ((err.code === 'EAFNOSUPPORT' || err.code === 'EADDRNOTAVAIL') && !forceIpv4Only) {
+        bindServer(targetPort, true);
+        return;
+      }
+      if (err.code === 'EADDRINUSE' && isLocalLaunch) {
+        const alreadyRunning = await checkExistingResiControl(targetPort);
+        if (alreadyRunning) {
+          const url = `http://localhost:${targetPort}`;
+          try {
+            fs.writeFileSync(path.resolve(ROOT_DIR, '.local-url'), url, 'utf8');
+          } catch {}
+          console.log(`ResiControl ya se encuentra ejecutándose en ${url}`);
+          return;
+        }
+        if (targetPort < PORT + 20) {
+          console.warn(`Puerto ${targetPort} en uso; intentando puerto ${targetPort + 1}...`);
+          bindServer(targetPort + 1, forceIpv4Only);
+          return;
+        }
+      }
+      console.error('Fatal server listen error:', err);
+      process.exit(1);
+    });
+
+    const onListening = () => {
+      const url = `http://localhost:${targetPort}`;
+      if (process.env.RESICONTROL_LOCAL === '1') {
+        try {
+          fs.writeFileSync(path.resolve(ROOT_DIR, '.local-url'), url, 'utf8');
+        } catch {}
+      }
+      console.log(`ResiControl server listening on http://0.0.0.0:${targetPort} (${db.engine})`);
+    };
+
+    if (forceIpv4Only || !isLocalLaunch) {
+      srv.listen(targetPort, '0.0.0.0', onListening);
+    } else {
+      srv.listen(targetPort, onListening);
+    }
+  };
+
+  bindServer(PORT);
 }
 
 startServer().catch((err) => {

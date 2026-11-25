@@ -19,6 +19,7 @@ import {
   FileSpreadsheet,
   ArrowRight,
   Database,
+  Printer,
 } from 'lucide-react';
 import type { AnalyticsSummary, RecordStatus } from '../types';
 
@@ -28,6 +29,7 @@ interface DashboardViewProps {
   onNavigate: (tab: string, statusFilter?: RecordStatus | 'all' | 'duplicates') => void;
   onLoadDemo: () => Promise<void>;
   demoLoading: boolean;
+  onOpenPrintReport: () => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -36,6 +38,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onNavigate,
   onLoadDemo,
   demoLoading,
+  onOpenPrintReport,
 }) => {
   if (loading && !analytics) {
     return (
@@ -226,8 +229,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 Distribución mensual por estado y tasa de cumplimiento acumulado
               </p>
             </div>
-            <div className="text-xs text-slate-500 font-mono tabular-nums">
-              {analytics?.monthly.length || 0} mes(es) registrado(s)
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-slate-500 font-mono tabular-nums">
+                {analytics?.monthly.length || 0} mes(es) registrado(s)
+              </span>
+              <button
+                type="button"
+                onClick={onOpenPrintReport}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-300 text-slate-700 text-xs font-medium rounded-lg hover:bg-slate-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Printer className="w-3.5 h-3.5 text-teal-700" />
+                Imprimir Informe Mensual
+              </button>
             </div>
           </div>
 
