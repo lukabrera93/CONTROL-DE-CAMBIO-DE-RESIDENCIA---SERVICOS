@@ -4,45 +4,68 @@ import { VitePWA } from 'vite-plugin-pwa';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'node:url';
-import {defineConfig} from 'vite';
+import { defineConfig } from 'vite';
 
 const CONFIG_DIR = path.dirname(fileURLToPath(import.meta.url));
 
+function normalizeBase(raw?: string): string {
+  if (!raw) return '/';
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === '/') return '/';
+  if (trimmed === './') return './';
+  const withLeading = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+  return withLeading.endsWith('/') ? withLeading : `${withLeading}/`;
+}
+
+const resolvedBase = normalizeBase(
+  process.env.VITE_BASE_PATH ||
+    (process.env.GITHUB_ACTIONS === 'true' && process.env.GITHUB_REPOSITORY
+      ? `/${process.env.GITHUB_REPOSITORY.split('/')[1]}/`
+      : '/')
+);
+
 export default defineConfig(() => {
   return {
-    base: '/CONTROL-DE-CAMBIO-DE-RESIDENCIA---SERVICOS/',
+    base: resolvedBase,
     plugins: [
       react(),
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
-        includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
+        includeAssets: [
+          'icon.svg',
+          'apple-touch-icon.png',
+          'pwa-192x192.png',
+          'pwa-512x512.png',
+          'pwa-maskable-512x512.png',
+        ],
         manifest: {
-          id: '/',
+          id: resolvedBase,
           name: 'ResiControl — Gestión de Planillas',
           short_name: 'ResiControl',
-          description: 'Gestión offline y en línea de planillas de Cambio de Residencia, control nominal de estados, duplicados e informes mensuales.',
+          description:
+            'Gestión offline y en línea de planillas de Cambio de Residencia, control nominal de estados, duplicados e informes mensuales.',
           theme_color: '#0f766e',
           background_color: '#f8fafc',
           display: 'standalone',
-          start_url: '/',
-          scope: '/',
+          start_url: resolvedBase,
+          scope: resolvedBase,
           lang: 'es',
           icons: [
             {
-              src: '/pwa-192x192.png',
+              src: `${resolvedBase}pwa-192x192.png`,
               sizes: '192x192',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-512x512.png',
+              src: `${resolvedBase}pwa-512x512.png`,
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-maskable-512x512.png',
+              src: `${resolvedBase}pwa-maskable-512x512.png`,
               sizes: '512x512',
               type: 'image/png',
               purpose: 'maskable',
@@ -52,6 +75,9 @@ export default defineConfig(() => {
         workbox: {
           maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          cleanupOutdatedCaches: true,
+          clientsClaim: true,
+          skipWaiting: true,
           navigateFallbackDenylist: [/^\/api\//],
           runtimeCaching: [
             {
@@ -103,7 +129,7 @@ export default defineConfig(() => {
           const srcAssets = path.resolve(CONFIG_DIR, 'src/assets');
           const distAssets = path.resolve(distDir, 'src/assets');
           if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
-            fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
+            fs.cpSync(srcAssets, distAssets, { recursive: true, force: true });
           }
         },
       },

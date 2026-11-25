@@ -103,7 +103,8 @@ export function usePWAInstall() {
 export const PWAInstallButton: React.FC<{
   variant?: 'sidebar' | 'header';
   records?: ResidenceRecord[];
-}> = ({ variant = 'sidebar', records = [] }) => {
+  hasBackend?: boolean;
+}> = ({ variant = 'sidebar', records = [], hasBackend = false }) => {
   const { isInstallable, isInstalled, isIOS, inIframe, install } = usePWAInstall();
   const [modalOpen, setModalOpen] = useState(false);
 
@@ -223,14 +224,20 @@ export const PWAInstallButton: React.FC<{
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2.5">
-                  <a
-                    href="/api/download-local"
-                    download="ResiControl_Local.zip"
-                    className="inline-flex items-center gap-2 px-4 py-2 bg-slate-900 text-white text-xs font-medium rounded-lg hover:bg-slate-800 whitespace-nowrap"
-                  >
-                    <Download className="w-4 h-4" />
-                    Descargar Instalador (.zip)
-                  </a>
+                  {hasBackend ? (
+                    <a
+                      href="/api/download-local"
+                      download="ResiControl_Local.zip"
+                      className="inline-flex items-center gap-2 px-4 py-2 bg-slate-900 text-white text-xs font-medium rounded-lg hover:bg-slate-800 whitespace-nowrap"
+                    >
+                      <Download className="w-4 h-4" />
+                      Descargar Instalador (.zip)
+                    </a>
+                  ) : (
+                    <div className="text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-md px-3 py-2 w-full">
+                      En GitHub Pages la aplicación funciona 100% desde el navegador (PWA + IndexedDB). Use la opción <strong>1. Instalar como Aplicación</strong> arriba para instalarla localmente sin internet.
+                    </div>
+                  )}
 
                   {records.length > 0 && (
                     <button
@@ -254,11 +261,12 @@ export const PWAInstallButton: React.FC<{
 
 export const OfflineSyncBanner: React.FC<{
   isOnline: boolean;
+  hasBackend?: boolean;
   pendingCount: number;
   syncing: boolean;
   onSyncNow: () => void;
-}> = ({ isOnline, pendingCount, syncing, onSyncNow }) => {
-  if (isOnline && pendingCount === 0) return null;
+}> = ({ isOnline, hasBackend = false, pendingCount, syncing, onSyncNow }) => {
+  if (isOnline && (!hasBackend || pendingCount === 0)) return null;
 
   return (
     <div
@@ -281,7 +289,7 @@ export const OfflineSyncBanner: React.FC<{
           </span>
         )}
       </div>
-      {isOnline && pendingCount > 0 && (
+      {isOnline && hasBackend && pendingCount > 0 && (
         <button
           type="button"
           disabled={syncing}

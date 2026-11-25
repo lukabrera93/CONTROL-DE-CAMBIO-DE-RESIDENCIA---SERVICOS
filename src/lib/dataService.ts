@@ -78,10 +78,46 @@ async function appendLocalLogAndNotification(
   }
 }
 
+let cachedBackendStatus: boolean | null = null;
+let lastProbeTs = 0;
+
+export async function isBackendAvailable(force = false): Promise<boolean> {
+  if (!navigator.onLine) return false;
+  const now = Date.now();
+  if (!force && cachedBackendStatus !== null && now - lastProbeTs < 30_000) {
+    return cachedBackendStatus;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1800);
+  try {
+    const resp = await fetch('/api/health', {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+    });
+    const ct = resp.headers.get('content-type') || '';
+    if (!resp.ok || !ct.includes('application/json')) {
+      cachedBackendStatus = false;
+      lastProbeTs = now;
+      return false;
+    }
+    const json = (await resp.json().catch(() => null)) as { status?: string } | null;
+    cachedBackendStatus = Boolean(json && json.status === 'ok');
+    lastProbeTs = now;
+    return cachedBackendStatus;
+  } catch {
+    cachedBackendStatus = false;
+    lastProbeTs = now;
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function fetchAppSnapshot(): Promise<FullAppSnapshot> {
   const pendingOps = await getOutboxOps();
+  const hasBackend = await isBackendAvailable();
 
-  if (navigator.onLine) {
+  if (hasBackend) {
     try {
       const [recRes, anaRes, upRes, bakRes, logRes, notifRes, metRes, repRes] =
         await Promise.all([
@@ -123,7 +159,7 @@ export async function fetchAppSnapshot(): Promise<FullAppSnapshot> {
 
       return snapshot;
     } catch {
-      // Fall back transparently to IndexedDB
+      cachedBackendStatus = false;
     }
   }
 
@@ -150,7 +186,7 @@ export async function updateRecordStatusOrFields(
   id: number,
   body: Partial<ResidenceRecord>
 ): Promise<void> {
-  if (navigator.onLine) {
+  if (await isBackendAvailable()) {
     try {
       const resp = await fetch(`/api/records/${id}`, {
         method: 'PATCH',
@@ -178,7 +214,7 @@ export async function updateRecordStatusOrFields(
 }
 
 export async function createRecordEntry(body: Partial<ResidenceRecord>): Promise<void> {
-  if (navigator.onLine) {
+  if (await isBackendAvailable()) {
     try {
       const resp = await fetch('/api/records', {
         method: 'POST',
@@ -227,7 +263,7 @@ export async function createRecordEntry(body: Partial<ResidenceRecord>): Promise
 }
 
 export async function bulkUpdateStatus(ids: number[], status: RecordStatus): Promise<void> {
-  if (navigator.onLine) {
+  if (await isBackendAvailable()) {
     try {
       const resp = await fetch('/api/records/bulk-status', {
         method: 'POST',
@@ -256,7 +292,7 @@ export async function bulkUpdateStatus(ids: number[], status: RecordStatus): Pro
 }
 
 export async function deleteRecordEntry(id: number): Promise<void> {
-  if (navigator.onLine) {
+  if (await isBackendAvailable()) {
     try {
       const resp = await fetch(`/api/records/${id}`, { method: 'DELETE' });
       if (resp.ok) return;
@@ -275,7 +311,7 @@ export async function deleteRecordEntry(id: number): Promise<void> {
 }
 
 export async function resolveDuplicatesBatch(keep: 'earliest' | 'latest'): Promise<void> {
-  if (navigator.onLine) {
+  if (await isBackendAvailable()) {
     try {
       const resp = await fetch('/api/duplicates/resolve', {
         method: 'POST',
@@ -337,7 +373,7 @@ export async function previewExcelFile(file: File): Promise<{
     reader.readAsDataURL(file);
   });
 
-  if (navigator.onLine) {
+  if (await isBackendAvailable()) {
     try {
       const resp = await fetch('/api/import/preview', {
         method: 'POST',
@@ -421,7 +457,7 @@ export async function importExcelData(params: {
     servicio_corresponde: string;
   }>;
 }): Promise<{ imported: number; duplicatesDetected: number }> {
-  if (navigator.onLine) {
+  if (await isBackendAvailable()) {
     try {
       const resp = await fetch('/api/import', {
         method: 'POST',
@@ -537,7 +573,7 @@ export async function markRecordsDispatched(
 ): Promise<void> {
   if (ids.length === 0) return;
 
-  if (navigator.onLine) {
+  if (await isBackendAvailable()) {
     try {
       const resp = await fetch('/api/records/mark-dispatched', {
         method: 'POST',
@@ -685,6 +721,143 @@ export async function downloadLocalBackupJson(records: ResidenceRecord[]): Promi
   );
   const blob = new Blob([payload], { type: 'application/json;charset=utf-8' });
   triggerBlobDownload(blob, `resicontrol_backup_${now.slice(0, 10)}.json`);
+}
+
+export async function loadDemoRecords(): Promise<void> {
+  if (await isBackendAvailable()) {
+    try {
+      const resp = await fetch('/api/demo-load', { method: 'POST' });
+      if (resp.ok) return;
+    } catch {
+      // Fall back to local demo records
+    }
+  }
+
+  const now = new Date().toISOString();
+  const mk = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+  const sampleRows: Omit<ResidenceRecord, 'id'>[] = [
+    {
+      row_number: 1,
+      documento: '8123456',
+      codigo_nro: 'COD-101',
+      nombres: 'Mateo Sebastián',
+      apellidos: 'Benítez Rojas',
+      fecha_nacimiento: '14/05/2023',
+      barrio_residencia: 'San Vicente',
+      servicio_figura: 'USF Centro',
+      servicio_corresponde: 'USF San Vicente',
+      distrito: 'Distrito Capital',
+      servicio_planilla: 'USF Centro',
+      responsable: 'Lic. Carmen Duarte',
+      status: 'realizado',
+      month_key: mk,
+      source_file: 'Planilla_Ejemplo_Demo.xlsx',
+      notes: '',
+      created_at: now,
+      updated_at: now,
+    },
+    {
+      row_number: 2,
+      documento: '8234567',
+      codigo_nro: 'COD-102',
+      nombres: 'Sofía Valentina',
+      apellidos: 'Gómez Vera',
+      fecha_nacimiento: '22/08/2022',
+      barrio_residencia: 'Santa Ana',
+      servicio_figura: 'USF Centro',
+      servicio_corresponde: 'Hospital Distrital',
+      distrito: 'Distrito Capital',
+      servicio_planilla: 'USF Centro',
+      responsable: 'Lic. Carmen Duarte',
+      status: 'pendiente',
+      month_key: mk,
+      source_file: 'Planilla_Ejemplo_Demo.xlsx',
+      notes: '',
+      created_at: now,
+      updated_at: now,
+    },
+    {
+      row_number: 3,
+      documento: '8345678',
+      codigo_nro: 'COD-103',
+      nombres: 'Lucas Gabriel',
+      apellidos: 'Acosta López',
+      fecha_nacimiento: '03/11/2021',
+      barrio_residencia: 'Villa Aurelia',
+      servicio_figura: 'USF Centro',
+      servicio_corresponde: 'USF Limpio Norte (Otro Dpto.)',
+      distrito: 'Distrito Capital',
+      servicio_planilla: 'USF Centro',
+      responsable: 'Lic. Carmen Duarte',
+      status: 'otro_departamento',
+      month_key: mk,
+      source_file: 'Planilla_Ejemplo_Demo.xlsx',
+      notes: '',
+      created_at: now,
+      updated_at: now,
+    },
+  ];
+
+  const existing = (await idbGet<ResidenceRecord[]>('records')) || [];
+  let nextId = getNextTempId(existing);
+  const created = sampleRows.map((row) => ({ ...row, id: nextId-- }));
+  await idbSet('records', [...created, ...existing]);
+
+  const uploads = (await idbGet<UploadBatch[]>('uploads')) || [];
+  uploads.unshift({
+    id: -Date.now(),
+    filename: 'Planilla_Ejemplo_Demo.xlsx',
+    distrito: 'Distrito Capital',
+    servicio: 'USF Centro',
+    responsable: 'Lic. Carmen Duarte',
+    total_rows: created.length,
+    duplicates_detected: 0,
+    uploaded_at: now,
+  });
+  await idbSet('uploads', uploads.slice(0, 50));
+}
+
+export async function restoreBackupData(
+  mode: 'merge' | 'replace',
+  data: { records?: ResidenceRecord[]; uploads?: UploadBatch[] }
+): Promise<{ restored: number; viaServer: boolean }> {
+  if (await isBackendAvailable()) {
+    try {
+      const resp = await fetch('/api/backups/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, data }),
+      });
+      if (resp.ok) {
+        const resJson = await resp.json();
+        return { restored: Number(resJson.restored || 0), viaServer: true };
+      }
+      const errJson = await resp.json().catch(() => ({}));
+      throw new Error(errJson.error || 'No se pudo restaurar el respaldo');
+    } catch (err) {
+      if (err instanceof Error && err.message !== 'Failed to fetch') {
+        throw err;
+      }
+    }
+  }
+
+  const incoming = Array.isArray(data.records) ? data.records : [];
+  if (mode === 'replace') {
+    await idbSet('records', incoming);
+    if (Array.isArray(data.uploads)) {
+      await idbSet('uploads', data.uploads);
+    }
+    return { restored: incoming.length, viaServer: false };
+  }
+
+  const existing = (await idbGet<ResidenceRecord[]>('records')) || [];
+  let nextId = getNextTempId(existing);
+  const mapped = incoming.map((r) => ({
+    ...r,
+    id: r.id && !existing.some((e) => e.id === r.id) ? r.id : nextId--,
+  }));
+  await idbSet('records', [...mapped, ...existing]);
+  return { restored: mapped.length, viaServer: false };
 }
 
 export { syncPendingOutbox };

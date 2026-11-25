@@ -1,4 +1,4 @@
-name: Publicar ControlTerm en GitHub Pages
+name: Publicar ResiControl en GitHub Pages
 
 on:
   push:
@@ -28,6 +28,10 @@ jobs:
         with:
           node-version: 22
 
+      - name: Configurar GitHub Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
       - name: Instalar dependencias
         run: npm install --legacy-peer-deps --no-audit --no-fund
 
@@ -35,7 +39,14 @@ jobs:
         run: npm run lint
 
       - name: Compilar aplicación
+        env:
+          VITE_BASE_PATH: ${{ steps.pages.outputs.base_path }}/
         run: npm run build
+
+      - name: Preparar archivos estáticos para Pages
+        run: |
+          touch dist/.nojekyll
+          cp dist/index.html dist/404.html
 
       - name: Subir artefacto para GitHub Pages
         uses: actions/upload-pages-artifact@v3

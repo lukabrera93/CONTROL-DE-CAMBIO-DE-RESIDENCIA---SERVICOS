@@ -8,7 +8,11 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import type { BackupEntry, ResidenceRecord } from '../types';
-import { downloadLocalBackupJson, downloadOfficialExcel } from '../lib/dataService';
+import {
+  downloadLocalBackupJson,
+  downloadOfficialExcel,
+  restoreBackupData,
+} from '../lib/dataService';
 
 interface BackupsViewProps {
   backups: BackupEntry[];
@@ -60,18 +64,12 @@ export const BackupsView: React.FC<BackupsViewProps> = ({
     try {
       const text = await file.text();
       const parsed = JSON.parse(text);
-      const resp = await fetch('/api/backups/restore', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: restoreMode, data: parsed }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'No se pudo restaurar');
+      const data = await restoreBackupData(restoreMode, parsed);
       setMessage({
         type: 'ok',
         text: `Restauración completada (${data.restored} registros importados en modo ${
           restoreMode === 'replace' ? 'Reemplazo total' : 'Combinación'
-        }).`,
+        }${data.viaServer ? '' : ' en base local del navegador'}).`,
       });
       await onRefresh();
     } catch (err) {

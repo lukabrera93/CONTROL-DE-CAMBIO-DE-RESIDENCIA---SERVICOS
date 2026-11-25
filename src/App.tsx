@@ -30,6 +30,8 @@ import type {
 import {
   fetchAppSnapshot,
   syncPendingOutbox,
+  isBackendAvailable,
+  loadDemoRecords,
 } from './lib/dataService';
 import { DashboardView } from './components/DashboardView';
 import { RecordsView } from './components/RecordsView';
@@ -86,6 +88,7 @@ export default function App() {
   const [metrics, setMetrics] = useState<ServerMetricsSnapshot | null>(null);
   const [monthlyReports, setMonthlyReports] = useState<MonthlyServerReport[]>([]);
   const [sseConnected, setSseConnected] = useState(false);
+  const [hasBackend, setHasBackend] = useState(false);
 
   const [notifDrawerOpen, setNotifDrawerOpen] = useState(false);
   const [toastAlert, setToastAlert] = useState<AppNotification | null>(null);
@@ -93,7 +96,11 @@ export default function App() {
 
   const fetchAllData = useCallback(async () => {
     try {
-      const snap = await fetchAppSnapshot();
+      const [snap, backendOk] = await Promise.all([
+        fetchAppSnapshot(),
+        isBackendAvailable(),
+      ]);
+      setHasBackend(backendOk);
       setRecords(snap.records);
       setDuplicateClusters(snap.duplicateClusters);
       setAnalytics(snap.analytics);
@@ -114,6 +121,7 @@ export default function App() {
 
   const handleSyncNow = useCallback(async () => {
     if (!navigator.onLine) return;
+    if (!(await isBackendAvailable(true))) return;
     setSyncing(true);
     try {
       await syncPendingOutbox();
@@ -129,14 +137,14 @@ export default function App() {
 
   // Auto-sync queued offline operations when connectivity returns
   useEffect(() => {
-    if (isOnline && pendingSyncCount > 0) {
+    if (isOnline && hasBackend && pendingSyncCount > 0) {
       handleSyncNow();
     }
-  }, [isOnline, pendingSyncCount, handleSyncNow]);
+  }, [isOnline, hasBackend, pendingSyncCount, handleSyncNow]);
 
-  // Real-time SSE connection when online
+  // Real-time SSE connection when online and Express backend is present
   useEffect(() => {
-    if (!isOnline) {
+    if (!isOnline || !hasBackend) {
       setSseConnected(false);
       return;
     }
@@ -188,7 +196,7 @@ export default function App() {
     return () => {
       es.close();
     };
-  }, [fetchAllData, isOnline]);
+  }, [fetchAllData, isOnline, hasBackend]);
 
   useEffect(() => {
     if (!toastAlert) return;
@@ -199,7 +207,7 @@ export default function App() {
   const unreadCount = notifications.filter((n) => n.is_read === 0).length;
 
   const handleMarkAllRead = async () => {
-    if (isOnline) {
+    if (isOnline && hasBackend) {
       await fetch('/api/notifications/read-all', { method: 'POST' }).catch(() => {});
     }
     setNotifications((prev) => prev.map((n) => ({ ...n, is_read: 1 })));
@@ -219,7 +227,7 @@ export default function App() {
   const handleLoadDemo = async () => {
     setDemoLoading(true);
     try {
-      await fetch('/api/demo-load', { method: 'POST' });
+      await loadDemoRecords();
       await fetchAllData();
     } finally {
       setDemoLoading(false);
@@ -339,12 +347,16 @@ export default function App() {
         </nav>
 
         <div className="p-4 border-t border-slate-200 space-y-3">
-          <PWAInstallButton variant="sidebar" records={records} />
+          <PWAInstallButton variant="sidebar" records={records} hasBackend={hasBackend} />
           <div className="text-xs text-slate-500">
             <div>Cambio de Residencia</div>
             <div className="mt-0.5 font-mono tabular-nums text-[11px] text-slate-400">
-              {fromOfflineCache || !isOnline ? 'Modo Offline (IndexedDB)' : 'SQLite + PWA Offline'} ·{' '}
-              {analytics?.totals.total || 0} reg.
+              {!isOnline
+                ? 'Modo Offline (IndexedDB)'
+                : hasBackend && !fromOfflineCache
+                ? 'SQLite + PWA Offline'
+                : 'Modo Web Local (IndexedDB)'}{' '}
+              · {analytics?.totals.total || 0} reg.
             </div>
           </div>
         </div>
@@ -394,7 +406,7 @@ export default function App() {
               )}
             </button>
 
-            <PWAInstallButton variant="header" records={records} />
+            <PWAInstallButton variant="header" records={records} hasBackend={hasBackend} />
 
             <button
               type="button"
@@ -458,6 +470,7 @@ export default function App() {
 
         <OfflineSyncBanner
           isOnline={isOnline}
+          hasBackend={hasBackend}
           pendingCount={pendingSyncCount}
           syncing={syncing}
           onSyncNow={handleSyncNow}

@@ -22,6 +22,7 @@ import {
   Printer,
 } from 'lucide-react';
 import type { AnalyticsSummary, RecordStatus } from '../types';
+import { downloadOfficialExcel } from '../lib/dataService';
 
 interface DashboardViewProps {
   analytics: AnalyticsSummary | null;
@@ -84,12 +85,20 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <Upload className="w-4 h-4" />
             Subir Planilla Excel
           </button>
-          <a
-            href="/api/export/excel?template=true"
-            className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-300 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
+          <button
+            type="button"
+            onClick={() =>
+              downloadOfficialExcel({
+                records: [],
+                statusFilter: 'all',
+                monthFilter: 'all',
+                template: true,
+              })
+            }
+            className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-300 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             Descargar Plantilla Oficial
-          </a>
+          </button>
           <button
             type="button"
             disabled={demoLoading}
