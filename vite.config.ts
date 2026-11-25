@@ -6,6 +6,7 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    base: '/CONTROL-DE-CAMBIO-DE-RESIDENCIA---SERVICOS/',
     plugins: [
       react(),
       tailwindcss(),
