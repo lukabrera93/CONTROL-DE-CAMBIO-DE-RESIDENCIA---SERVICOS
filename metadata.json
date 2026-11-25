@@ -1,0 +1,6 @@
+{
+  "name": "ResiControl",
+  "description": "Sistema de gestión de planillas Excel de cambio de residencia, control nominal de estados, detección de duplicados, avance mensual y monitoreo operativo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
