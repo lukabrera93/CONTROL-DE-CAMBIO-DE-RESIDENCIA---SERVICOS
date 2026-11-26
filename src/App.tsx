@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   LayoutDashboard,
   Table2,
@@ -12,6 +12,7 @@ import {
   CheckCircle2,
   Info,
   Printer,
+  LogOut,
 } from 'lucide-react';
 import type {
   ResidenceRecord,
@@ -78,6 +79,9 @@ export default function App() {
   const [notifDrawerOpen, setNotifDrawerOpen] = useState(false);
   const [toastAlert, setToastAlert] = useState<AppNotification | null>(null);
   const [printReportOpen, setPrintReportOpen] = useState(false);
+  const [exitPromptOpen, setExitPromptOpen] = useState(false);
+  const [appClosed, setAppClosed] = useState(false);
+  const bypassUnloadRef = useRef(false);
 
   const fetchAllData = useCallback(async () => {
     try {
@@ -159,6 +163,70 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toastAlert]);
 
+  // Intercept browser tab/window close attempts and show floating backup prompt if user stays
+  useEffect(() => {
+    if (appClosed) return;
+
+    let reopenTimer: number | null = null;
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (bypassUnloadRef.current) return;
+      e.preventDefault();
+      e.returnValue = '';
+
+      if (reopenTimer !== null) {
+        window.clearTimeout(reopenTimer);
+      }
+      reopenTimer = window.setTimeout(() => {
+        if (!bypassUnloadRef.current) {
+          setExitPromptOpen(true);
+        }
+      }, 150);
+    };
+
+    const handlePageHide = () => {
+      if (reopenTimer !== null) {
+        window.clearTimeout(reopenTimer);
+        reopenTimer = null;
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pagehide', handlePageHide);
+    return () => {
+      if (reopenTimer !== null) {
+        window.clearTimeout(reopenTimer);
+      }
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pagehide', handlePageHide);
+    };
+  }, [appClosed]);
+
+  const handleRequestCloseApp = () => {
+    setMobileMenuOpen(false);
+    setExitPromptOpen(true);
+  };
+
+  const handleAcceptBackupBeforeClose = () => {
+    setExitPromptOpen(false);
+    setActiveTab('backups');
+  };
+
+  const handleRejectBackupAndClose = () => {
+    bypassUnloadRef.current = true;
+    setExitPromptOpen(false);
+    window.close();
+    window.setTimeout(() => {
+      if (!window.closed) {
+        setAppClosed(true);
+      }
+    }, 150);
+  };
+
+  const handleReopenApp = () => {
+    bypassUnloadRef.current = false;
+    setAppClosed(false);
+  };
+
   const unreadCount = notifications.filter((n) => n.is_read === 0).length;
 
   const handleMarkAllRead = async () => {
@@ -213,6 +281,35 @@ export default function App() {
     },
     { key: 'backups', label: 'Respaldos', icon: HardDrive },
   ];
+
+  if (appClosed) {
+    return (
+      <div className="min-h-screen bg-slate-50 text-slate-900 flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-white border border-slate-200 rounded-lg shadow-sm p-6 text-center space-y-4">
+          <div className="w-11 h-11 rounded-lg bg-slate-100 text-slate-700 flex items-center justify-center mx-auto">
+            <LogOut className="w-5 h-5" />
+          </div>
+          <div>
+            <h1 className="text-base font-semibold text-slate-900">
+              ResiControl cerrado
+            </h1>
+            <p className="text-xs text-slate-600 mt-1.5 leading-relaxed">
+              Ha decidido salir sin realizar una copia de respaldo adicional. Por seguridad del navegador, si esta pestaña no se cerró automáticamente, ya puede cerrarla manualmente sin advertencias.
+            </p>
+          </div>
+          <div className="pt-2 flex justify-center">
+            <button
+              type="button"
+              onClick={handleReopenApp}
+              className="px-4 py-2 bg-teal-700 text-white text-xs font-medium rounded-lg hover:bg-teal-800 transition-colors cursor-pointer"
+            >
+              Volver a abrir ResiControl
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex">
@@ -284,7 +381,7 @@ export default function App() {
             );
           })}
 
-          <div className="pt-3 mt-3 border-t border-slate-200">
+          <div className="pt-3 mt-3 border-t border-slate-200 space-y-1">
             <button
               type="button"
               onClick={() => {
@@ -295,6 +392,15 @@ export default function App() {
             >
               <Printer className="w-4 h-4 text-teal-700 shrink-0" />
               <span className="truncate">Imprimir Informe Mensual</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleRequestCloseApp}
+              className="w-full flex items-center gap-3 px-3 py-2.5 text-sm font-medium text-slate-600 rounded-lg hover:bg-rose-50 hover:text-rose-700 transition-colors cursor-pointer"
+            >
+              <LogOut className="w-4 h-4 shrink-0" />
+              <span className="truncate">Cerrar Aplicación</span>
             </button>
           </div>
         </nav>
@@ -367,6 +473,16 @@ export default function App() {
               className="px-4 py-2 bg-teal-700 text-white text-xs font-medium rounded-lg hover:bg-teal-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               Subir Planilla Excel
+            </button>
+
+            <button
+              type="button"
+              onClick={handleRequestCloseApp}
+              title="Cerrar aplicación"
+              className="inline-flex items-center gap-1.5 px-3 py-2 border border-slate-200 bg-white text-slate-700 text-xs font-medium rounded-lg hover:bg-rose-50 hover:text-rose-700 hover:border-rose-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Cerrar</span>
             </button>
 
             {/* Notifications Popover */}
@@ -500,6 +616,71 @@ export default function App() {
         uploads={uploads}
         availableMonths={analytics?.availableMonths || []}
       />
+
+      {/* Floating Backup Confirmation Modal Before Closing App */}
+      {exitPromptOpen && (
+        <div
+          className="no-print fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-[1px] flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="exit-backup-title"
+        >
+          <div className="bg-white border border-slate-200 rounded-lg shadow-xl max-w-md w-full overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-teal-50 text-teal-700 flex items-center justify-center shrink-0">
+                  <HardDrive className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2
+                    id="exit-backup-title"
+                    className="text-sm font-semibold text-slate-900"
+                  >
+                    ¿Hacer copia de respaldo antes de cerrar?
+                  </h2>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Protección de datos · {records.length} registro(s) cargados
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setExitPromptOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-700 rounded cursor-pointer"
+                aria-label="Cancelar cierre"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="px-5 py-4 text-xs text-slate-600 leading-relaxed space-y-2">
+              <p>
+                Antes de salir de ResiControl, puede guardar una copia de respaldo completa de sus planillas y registros.
+              </p>
+              <p className="text-slate-500">
+                Si acepta, será dirigido a la sección de <strong>Respaldos</strong>. Si rechaza, la aplicación se cerrará.
+              </p>
+            </div>
+
+            <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+              <button
+                type="button"
+                onClick={handleRejectBackupAndClose}
+                className="px-4 py-2 bg-white border border-slate-300 text-slate-700 text-xs font-medium rounded-lg hover:bg-rose-50 hover:text-rose-700 hover:border-rose-300 transition-colors cursor-pointer"
+              >
+                Rechazar y cerrar
+              </button>
+              <button
+                type="button"
+                onClick={handleAcceptBackupBeforeClose}
+                className="px-4 py-2 bg-teal-700 text-white text-xs font-medium rounded-lg hover:bg-teal-800 transition-colors cursor-pointer"
+              >
+                Aceptar e ir a Respaldos
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Automatic Duplicate / Import Real-time Toast Notification */}
       {toastAlert && (
