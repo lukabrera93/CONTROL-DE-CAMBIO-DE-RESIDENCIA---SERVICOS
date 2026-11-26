@@ -46,15 +46,17 @@ export const MonthlyReportPrintModal: React.FC<MonthlyReportPrintModalProps> = (
   const availableServicios = useMemo(() => {
     const set = new Set<string>();
     for (const u of uploads) {
+      if (distritoFilter !== 'all' && (u.distrito || '').trim() !== distritoFilter) continue;
       const val = (u.servicio || '').trim();
       if (val) set.add(val);
     }
     for (const r of records) {
+      if (distritoFilter !== 'all' && (r.distrito || '').trim() !== distritoFilter) continue;
       const val = (r.servicio_planilla || '').trim();
       if (val) set.add(val);
     }
     return Array.from(set).sort((a, b) => a.localeCompare(b, 'es'));
-  }, [records, uploads]);
+  }, [records, uploads, distritoFilter]);
 
   const defaultResponsable = useMemo(() => records[0]?.responsable || '', [records]);
 
@@ -87,11 +89,22 @@ export const MonthlyReportPrintModal: React.FC<MonthlyReportPrintModalProps> = (
 
     const svcMap = new Map<
       string,
-      { total: number; realizado: number; pendiente: number; otroDepto: number }
+      {
+        distrito: string;
+        servicio: string;
+        total: number;
+        realizado: number;
+        pendiente: number;
+        otroDepto: number;
+      }
     >();
     for (const r of scopedRecords) {
-      const key = r.servicio_figura || r.servicio_planilla || 'Sin especificar';
+      const distrito = (r.distrito || '').trim() || 'Sin especificar';
+      const servicio = (r.servicio_planilla || '').trim() || 'Sin especificar';
+      const key = `${distrito}|||${servicio}`;
       const entry = svcMap.get(key) || {
+        distrito,
+        servicio,
         total: 0,
         realizado: 0,
         pendiente: 0,
@@ -105,12 +118,16 @@ export const MonthlyReportPrintModal: React.FC<MonthlyReportPrintModalProps> = (
     }
 
     const byService = Array.from(svcMap.entries())
-      .map(([name, val]) => ({
-        name,
+      .map(([key, val]) => ({
+        key,
         ...val,
         pct: val.total > 0 ? Math.round((val.realizado / val.total) * 1000) / 10 : 0,
       }))
-      .sort((a, b) => b.total - a.total);
+      .sort((a, b) => {
+        const dCmp = a.distrito.localeCompare(b.distrito, 'es');
+        if (dCmp !== 0) return dCmp;
+        return a.servicio.localeCompare(b.servicio, 'es');
+      });
 
     return {
       total,
@@ -201,7 +218,10 @@ export const MonthlyReportPrintModal: React.FC<MonthlyReportPrintModalProps> = (
               </label>
               <select
                 value={distritoFilter}
-                onChange={(e) => setDistritoFilter(e.target.value)}
+                onChange={(e) => {
+                  setDistritoFilter(e.target.value);
+                  setServicioFilter('all');
+                }}
                 className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-md"
               >
                 <option value="all">Todos los distritos</option>
@@ -439,15 +459,16 @@ export const MonthlyReportPrintModal: React.FC<MonthlyReportPrintModalProps> = (
             </div>
           </div>
 
-          {/* Breakdown by Service */}
+          {/* Breakdown by Loaded District and Service */}
           <div className="print-avoid-break">
             <h3 className="text-xs font-bold uppercase tracking-wide text-slate-700 mb-2">
-              Desglose por Servicio de Origen
+              Desglose por Distrito y Servicio Cargado
             </h3>
             <table className="w-full text-left text-xs border-collapse border border-slate-300">
               <thead>
                 <tr className="bg-slate-100">
-                  <th className="border border-slate-300 px-3 py-2">Servicio donde Figura</th>
+                  <th className="border border-slate-300 px-3 py-2">Distrito</th>
+                  <th className="border border-slate-300 px-3 py-2">Servicio</th>
                   <th className="border border-slate-300 px-3 py-2 text-right">Total</th>
                   <th className="border border-slate-300 px-3 py-2 text-right">Realizado</th>
                   <th className="border border-slate-300 px-3 py-2 text-right">Pendiente</th>
@@ -459,7 +480,7 @@ export const MonthlyReportPrintModal: React.FC<MonthlyReportPrintModalProps> = (
                 {stats.byService.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={6}
+                      colSpan={7}
                       className="border border-slate-300 px-3 py-4 text-center text-slate-500"
                     >
                       Sin registros para el periodo seleccionado.
@@ -467,9 +488,12 @@ export const MonthlyReportPrintModal: React.FC<MonthlyReportPrintModalProps> = (
                   </tr>
                 ) : (
                   stats.byService.map((svc) => (
-                    <tr key={svc.name}>
+                    <tr key={svc.key}>
                       <td className="border border-slate-300 px-3 py-1.5 font-medium">
-                        {svc.name}
+                        {svc.distrito}
+                      </td>
+                      <td className="border border-slate-300 px-3 py-1.5 font-medium">
+                        {svc.servicio}
                       </td>
                       <td className="border border-slate-300 px-3 py-1.5 text-right font-mono tabular-nums">
                         {svc.total}

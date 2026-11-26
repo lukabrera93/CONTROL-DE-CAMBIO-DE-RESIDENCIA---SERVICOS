@@ -24,6 +24,10 @@ import {
   downloadOfficialExcel,
   markRecordsDispatched,
 } from '../lib/dataService';
+import {
+  DISTRICTS_CATALOG,
+  getServicesForDistrict,
+} from '../lib/districtsCatalog';
 
 interface RecordsViewProps {
   records: ResidenceRecord[];
@@ -107,15 +111,17 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
   const availableServicios = useMemo(() => {
     const set = new Set<string>();
     for (const u of uploads) {
+      if (distritoFilter !== 'all' && (u.distrito || '').trim() !== distritoFilter) continue;
       const val = (u.servicio || '').trim();
       if (val) set.add(val);
     }
     for (const r of records) {
+      if (distritoFilter !== 'all' && (r.distrito || '').trim() !== distritoFilter) continue;
       const val = (r.servicio_planilla || '').trim();
       if (val) set.add(val);
     }
     return Array.from(set).sort((a, b) => a.localeCompare(b, 'es'));
-  }, [records, uploads]);
+  }, [records, uploads, distritoFilter]);
 
   const matchesDimensionFilters = (r: ResidenceRecord) => {
     if (monthFilter !== 'all' && r.month_key !== monthFilter) {
@@ -486,7 +492,10 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
               </label>
               <select
                 value={distritoFilter}
-                onChange={(e) => setDistritoFilter(e.target.value)}
+                onChange={(e) => {
+                  setDistritoFilter(e.target.value);
+                  setServicioFilter('all');
+                }}
                 className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:ring-2 focus:ring-teal-600"
                 aria-label="Filtrar por distrito"
               >
@@ -952,25 +961,60 @@ export const RecordsView: React.FC<RecordsViewProps> = ({
                   <label className="block text-xs font-medium text-slate-600 mb-1">
                     Distrito (Planilla)
                   </label>
-                  <input
-                    type="text"
+                  <select
                     value={formData.distrito || ''}
-                    onChange={(e) => setFormData((d) => ({ ...d, distrito: e.target.value }))}
-                    className="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md"
-                  />
+                    onChange={(e) =>
+                      setFormData((d) => ({
+                        ...d,
+                        distrito: e.target.value,
+                        servicio_planilla: '',
+                      }))
+                    }
+                    className="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md bg-white"
+                  >
+                    <option value="">Seleccione un distrito...</option>
+                    {DISTRICTS_CATALOG.map((entry) => (
+                      <option key={entry.distrito} value={entry.distrito}>
+                        {entry.distrito}
+                      </option>
+                    ))}
+                    {formData.distrito &&
+                      !DISTRICTS_CATALOG.some((d) => d.distrito === formData.distrito) && (
+                        <option value={formData.distrito}>{formData.distrito}</option>
+                      )}
+                  </select>
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">
                     Servicio (Planilla)
                   </label>
-                  <input
-                    type="text"
+                  <select
                     value={formData.servicio_planilla || ''}
+                    disabled={!formData.distrito}
                     onChange={(e) =>
                       setFormData((d) => ({ ...d, servicio_planilla: e.target.value }))
                     }
-                    className="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md"
-                  />
+                    className="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md bg-white disabled:bg-slate-100 disabled:text-slate-400"
+                  >
+                    <option value="">
+                      {formData.distrito
+                        ? 'Seleccione un servicio...'
+                        : 'Elija primero un distrito'}
+                    </option>
+                    {getServicesForDistrict(formData.distrito || '').map((srv) => (
+                      <option key={srv} value={srv}>
+                        {srv}
+                      </option>
+                    ))}
+                    {formData.servicio_planilla &&
+                      !getServicesForDistrict(formData.distrito || '').includes(
+                        formData.servicio_planilla
+                      ) && (
+                        <option value={formData.servicio_planilla}>
+                          {formData.servicio_planilla}
+                        </option>
+                      )}
+                  </select>
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">

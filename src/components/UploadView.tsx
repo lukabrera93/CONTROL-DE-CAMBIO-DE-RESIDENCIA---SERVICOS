@@ -13,6 +13,11 @@ import {
   importExcelData,
   downloadOfficialExcel,
 } from '../lib/dataService';
+import {
+  DISTRICTS_CATALOG,
+  getServicesForDistrict,
+  matchCatalogSelection,
+} from '../lib/districtsCatalog';
 
 interface PreviewRow {
   row_number: number;
@@ -68,21 +73,10 @@ export const UploadView: React.FC<UploadViewProps> = ({
     duplicatesDetected: number;
   } | null>(null);
 
-  const savedDistritos = React.useMemo(() => {
-    const s = new Set<string>();
-    for (const u of uploads) {
-      if (u.distrito?.trim()) s.add(u.distrito.trim());
-    }
-    return Array.from(s).sort((a, b) => a.localeCompare(b, 'es'));
-  }, [uploads]);
-
-  const savedServicios = React.useMemo(() => {
-    const s = new Set<string>();
-    for (const u of uploads) {
-      if (u.servicio?.trim()) s.add(u.servicio.trim());
-    }
-    return Array.from(s).sort((a, b) => a.localeCompare(b, 'es'));
-  }, [uploads]);
+  const availableServicesForSelected = React.useMemo(
+    () => getServicesForDistrict(distritoOverride),
+    [distritoOverride]
+  );
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -93,18 +87,19 @@ export const UploadView: React.FC<UploadViewProps> = ({
 
     try {
       const data = await previewExcelFile(file);
+      const matched = matchCatalogSelection(data.distrito || '', data.servicio || '');
       setPreview({
         filename: file.name,
         base64: data.base64,
-        distrito: data.distrito || '',
-        servicio: data.servicio || '',
+        distrito: matched.distrito || data.distrito || '',
+        servicio: matched.servicio || data.servicio || '',
         responsable: data.responsable || '',
         totalRows: data.totalRows || 0,
         potentialDuplicates: data.potentialDuplicates || 0,
         rows: data.rows || [],
       });
-      setDistritoOverride(data.distrito || '');
-      setServicioOverride(data.servicio || '');
+      setDistritoOverride(matched.distrito);
+      setServicioOverride(matched.servicio);
       setResponsableOverride(data.responsable || '');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error inesperado leyendo el archivo');
@@ -282,39 +277,46 @@ export const UploadView: React.FC<UploadViewProps> = ({
           <div className="p-6 bg-slate-50 border-b border-slate-200 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">
-                Distrito (para filtro)
+                Distrito
               </label>
-              <input
-                type="text"
-                list="distritos-manuales"
+              <select
                 value={distritoOverride}
-                onChange={(e) => setDistritoOverride(e.target.value)}
-                placeholder="Añadir distrito manualmente"
+                onChange={(e) => {
+                  const nextDistrito = e.target.value;
+                  setDistritoOverride(nextDistrito);
+                  setServicioOverride('');
+                }}
                 className="w-full px-3 py-1.5 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-teal-600"
-              />
-              <datalist id="distritos-manuales">
-                {savedDistritos.map((d) => (
-                  <option key={d} value={d} />
+              >
+                <option value="">Seleccione un distrito...</option>
+                {DISTRICTS_CATALOG.map((entry) => (
+                  <option key={entry.distrito} value={entry.distrito}>
+                    {entry.distrito}
+                  </option>
                 ))}
-              </datalist>
+              </select>
             </div>
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">
-                Servicio (para filtro)
+                Servicio
               </label>
-              <input
-                type="text"
-                list="servicios-manuales"
+              <select
                 value={servicioOverride}
+                disabled={!distritoOverride}
                 onChange={(e) => setServicioOverride(e.target.value)}
-                placeholder="Añadir servicio manualmente"
-                className="w-full px-3 py-1.5 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-teal-600"
-              />
-              <datalist id="servicios-manuales">
-                {savedServicios.map((s) => (
-                  <option key={s} value={s} />
+                className="w-full px-3 py-1.5 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-teal-600 disabled:bg-slate-100 disabled:text-slate-400"
+              >
+                <option value="">
+                  {distritoOverride
+                    ? 'Seleccione un servicio...'
+                    : 'Elija primero un distrito'}
+                </option>
+                {availableServicesForSelected.map((srv) => (
+                  <option key={srv} value={srv}>
+                    {srv}
+                  </option>
                 ))}
-              </datalist>
+              </select>
             </div>
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">
@@ -399,11 +401,17 @@ export const UploadView: React.FC<UploadViewProps> = ({
             </table>
           </div>
 
-          <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-4">
+          <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-4">
             <span className="text-xs text-slate-500">
-              {preview.rows.length > 100
-                ? `Mostrando primeras 100 de ${preview.rows.length} filas`
-                : `Total: ${preview.rows.length} filas listas para guardar`}
+              {!distritoOverride || !servicioOverride ? (
+                <span className="text-amber-700 font-medium">
+                  Seleccione Distrito y Servicio para poder importar la planilla.
+                </span>
+              ) : preview.rows.length > 100 ? (
+                `Mostrando primeras 100 de ${preview.rows.length} filas`
+              ) : (
+                `Total: ${preview.rows.length} filas listas para guardar`
+              )}
             </span>
             <div className="flex items-center gap-3">
               <button
@@ -415,12 +423,17 @@ export const UploadView: React.FC<UploadViewProps> = ({
               </button>
               <button
                 type="button"
-                disabled={importing || preview.rows.length === 0}
+                disabled={
+                  importing ||
+                  preview.rows.length === 0 ||
+                  !distritoOverride ||
+                  !servicioOverride
+                }
                 onClick={handleConfirmImport}
                 className="px-4 py-2 text-xs font-medium text-white bg-teal-700 rounded-lg hover:bg-teal-800 disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
               >
                 {importing
-                  ? 'Importando a SQLite...'
+                  ? 'Importando...'
                   : `Importar ${preview.rows.length} Registros`}
               </button>
             </div>
