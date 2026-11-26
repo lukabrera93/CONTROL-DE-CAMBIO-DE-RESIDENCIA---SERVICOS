@@ -5,8 +5,6 @@ import {
   Upload,
   CopyCheck,
   HardDrive,
-  Activity,
-  GitBranch,
   Bell,
   Menu,
   X,
@@ -19,12 +17,9 @@ import type {
   ResidenceRecord,
   DuplicateCluster,
   AnalyticsSummary,
-  SystemLogEntry,
   AppNotification,
   BackupEntry,
   UploadBatch,
-  ServerMetricsSnapshot,
-  MonthlyServerReport,
   RecordStatus,
 } from './types';
 import {
@@ -38,8 +33,6 @@ import { RecordsView } from './components/RecordsView';
 import { UploadView } from './components/UploadView';
 import { DuplicatesView } from './components/DuplicatesView';
 import { BackupsView } from './components/BackupsView';
-import { MonitoringView } from './components/MonitoringView';
-import { CicdView } from './components/CicdView';
 import {
   PWAInstallButton,
   OfflineSyncBanner,
@@ -52,9 +45,7 @@ type TabKey =
   | 'records'
   | 'upload'
   | 'duplicates'
-  | 'backups'
-  | 'monitoring'
-  | 'cicd';
+  | 'backups';
 
 const TAB_LABELS: Record<TabKey, string> = {
   dashboard: 'Panel y Avance Mensual',
@@ -62,8 +53,6 @@ const TAB_LABELS: Record<TabKey, string> = {
   upload: 'Cargar Planilla Excel',
   duplicates: 'Control de Duplicados',
   backups: 'Respaldos y Restauración',
-  monitoring: 'Monitoreo, Logs e Informes',
-  cicd: 'GitHub, CI/CD y Despliegue',
 };
 
 export default function App() {
@@ -83,11 +72,7 @@ export default function App() {
   const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null);
   const [uploads, setUploads] = useState<UploadBatch[]>([]);
   const [backups, setBackups] = useState<BackupEntry[]>([]);
-  const [logs, setLogs] = useState<SystemLogEntry[]>([]);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
-  const [metrics, setMetrics] = useState<ServerMetricsSnapshot | null>(null);
-  const [monthlyReports, setMonthlyReports] = useState<MonthlyServerReport[]>([]);
-  const [sseConnected, setSseConnected] = useState(false);
   const [hasBackend, setHasBackend] = useState(false);
 
   const [notifDrawerOpen, setNotifDrawerOpen] = useState(false);
@@ -106,10 +91,7 @@ export default function App() {
       setAnalytics(snap.analytics);
       setUploads(snap.uploads);
       setBackups(snap.backups);
-      setLogs(snap.logs);
       setNotifications(snap.notifications);
-      setMetrics(snap.metrics);
-      setMonthlyReports(snap.monthlyReports);
       setFromOfflineCache(snap.fromOfflineCache);
       setPendingSyncCount(snap.pendingSyncCount);
     } catch (err) {
@@ -145,24 +127,10 @@ export default function App() {
   // Real-time SSE connection when online and Express backend is present
   useEffect(() => {
     if (!isOnline || !hasBackend) {
-      setSseConnected(false);
       return;
     }
 
     const es = new EventSource('/api/events');
-
-    es.addEventListener('connected', () => {
-      setSseConnected(true);
-    });
-
-    es.addEventListener('metrics', (e) => {
-      try {
-        const snapshot = JSON.parse((e as MessageEvent).data) as ServerMetricsSnapshot;
-        setMetrics(snapshot);
-      } catch {
-        // Ignore parse issues
-      }
-    });
 
     es.addEventListener('notification', (e) => {
       try {
@@ -176,22 +144,9 @@ export default function App() {
       }
     });
 
-    es.addEventListener('log', (e) => {
-      try {
-        const entry = JSON.parse((e as MessageEvent).data) as SystemLogEntry;
-        setLogs((prev) => [entry, ...prev].slice(0, 200));
-      } catch {
-        // Ignore parse issues
-      }
-    });
-
     es.addEventListener('data_changed', () => {
       fetchAllData();
     });
-
-    es.onerror = () => {
-      setSseConnected(false);
-    };
 
     return () => {
       es.close();
@@ -257,8 +212,6 @@ export default function App() {
       warn: duplicateClusters.length > 0,
     },
     { key: 'backups', label: 'Respaldos', icon: HardDrive },
-    { key: 'monitoring', label: 'Monitoreo y Logs', icon: Activity },
-    { key: 'cicd', label: 'GitHub y CI/CD', icon: GitBranch },
   ];
 
   return (
@@ -527,18 +480,6 @@ export default function App() {
               onRefresh={fetchAllData}
             />
           )}
-
-          {activeTab === 'monitoring' && (
-            <MonitoringView
-              metrics={metrics}
-              monthlyReports={monthlyReports}
-              logs={logs}
-              sseConnected={sseConnected}
-              onRefresh={fetchAllData}
-            />
-          )}
-
-          {activeTab === 'cicd' && <CicdView />}
         </main>
 
         <footer className="no-print border-t border-slate-200 bg-white px-4 sm:px-6 py-3 text-xs text-slate-500 flex flex-col sm:flex-row items-center justify-between gap-2">
