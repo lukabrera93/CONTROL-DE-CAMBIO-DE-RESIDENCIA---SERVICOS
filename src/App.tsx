@@ -465,24 +465,12 @@ export default function App() {
               )}
             </button>
 
-            <PWAInstallButton variant="header" records={records} hasBackend={hasBackend} />
-
             <button
               type="button"
               onClick={() => handleNavigate('upload')}
               className="px-4 py-2 bg-teal-700 text-white text-xs font-medium rounded-lg hover:bg-teal-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               Subir Planilla Excel
-            </button>
-
-            <button
-              type="button"
-              onClick={handleRequestCloseApp}
-              title="Cerrar aplicación"
-              className="inline-flex items-center gap-1.5 px-3 py-2 border border-slate-200 bg-white text-slate-700 text-xs font-medium rounded-lg hover:bg-rose-50 hover:text-rose-700 hover:border-rose-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Cerrar</span>
             </button>
 
             {/* Notifications Popover */}
